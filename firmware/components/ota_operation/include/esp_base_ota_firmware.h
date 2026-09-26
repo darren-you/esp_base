@@ -35,7 +35,9 @@ typedef enum {
  * untracked/invalid/aborted in otadata, then verify both signed images and the
  * receipt's exact C length/digest. Other modes require prepared == NULL.
  * These observations supply identities, not package or trial authorization.
- * An ambiguous inactive image or any inconsistent SDK observation yields no set. The
+ * A-only additionally requires an erased inactive image header, since app-side
+ * signature rejection alone cannot rule out bootloader fallback. An ambiguous
+ * inactive image or any inconsistent SDK observation yields no set. The
  * caller must serialize all app Flash and otadata writers through the entire
  * call and while using the result; this function neither takes a product lock
  * nor changes Flash, otadata, NVS or eFuse. The first entry is always running.

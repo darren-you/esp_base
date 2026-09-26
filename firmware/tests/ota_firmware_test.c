@@ -57,9 +57,13 @@ esp_err_t esp_partition_read(const esp_partition_t *partition, size_t offset,
                              void *destination, size_t size)
 {
     assert(partition == &partitions[0] || partition == &partitions[1]);
-    assert(offset == 0 && size == sizeof(esp_image_header_t));
+    assert(offset == 0 && (size == sizeof(esp_image_header_t) || size == 1));
     const size_t index = (size_t)(partition - partitions);
     if (read_failure[index]) return ESP_FAIL;
+    if (size == 1) {
+        *(uint8_t *)destination = image_magic[index];
+        return ESP_OK;
+    }
     *(esp_image_header_t *)destination = (esp_image_header_t){
         .magic = image_magic[index], .chip_id = image_chip_id[index]};
     return ESP_OK;
@@ -200,8 +204,23 @@ int main(void)
 
     reset(); target_state = EOTA_STATE_UNTRACKED;
     image_result[1] = EOTA_UPDATE_IMAGE_INVALID;
+    image_magic[1] = 0xff;
     assert(esp_base_ota_observe_firmware_set(ESP_BASE_OTA_FIRMWARE_CONFIRMED, NULL, &set) == ESP_BASE_OTA_FIRMWARE_OK);
     assert(set.bootable_count == 1 && set.running_firmware_sha256[0] == 0xa0 && rollback_calls == 0);
+
+    reset(); running_subtype = boot_subtype = ESP_PARTITION_SUBTYPE_APP_OTA_1;
+    target_state = EOTA_STATE_INVALID;
+    image_result[0] = EOTA_UPDATE_IMAGE_INVALID;
+    image_magic[0] = 0xff;
+    assert(esp_base_ota_observe_firmware_set(ESP_BASE_OTA_FIRMWARE_CONFIRMED, NULL, &set) == ESP_BASE_OTA_FIRMWARE_OK);
+    assert(set.bootable_count == 1 && set.running_firmware_sha256[0] == 0xb0);
+
+    reset(); target_state = EOTA_STATE_UNTRACKED;
+    image_result[1] = EOTA_UPDATE_IMAGE_INVALID;
+    expect_uncertain(ESP_BASE_OTA_FIRMWARE_CONFIRMED); /* Bad app signature, bootable header. */
+    image_magic[1] = 0xff;
+    read_failure[1] = true;
+    expect_uncertain(ESP_BASE_OTA_FIRMWARE_CONFIRMED);
 
     reset(); running_state = EOTA_STATE_PENDING_VERIFY;
     expect_uncertain(ESP_BASE_OTA_FIRMWARE_CONFIRMED);

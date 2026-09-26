@@ -79,6 +79,21 @@ static bool matching_base_image(const eota_policy_t *policy, uint8_t subtype,
                    sizeof description.project_name) == 0;
 }
 
+/* App-side signature rejection cannot establish that the bootloader will
+ * skip an inactive image: C3 RSA update verification has no signed-on-boot
+ * equivalent in this fixed SDK. A physically erased image header does. */
+static bool erased_inactive_image(uint8_t subtype, uint32_t address, uint32_t size)
+{
+    const esp_partition_t *partition = esp_partition_find_first(
+        ESP_PARTITION_TYPE_APP, subtype, NULL);
+    uint8_t magic = 0;
+    return partition != NULL && partition->type == ESP_PARTITION_TYPE_APP &&
+           partition->subtype == subtype && partition->address == address &&
+           partition->size == size &&
+           esp_partition_read(partition, 0, &magic, sizeof magic) == ESP_OK &&
+           magic == 0xffU;
+}
+
 esp_base_ota_firmware_result_t esp_base_ota_observe_firmware_set(
     esp_base_ota_firmware_observation_t observation,
     const eota_prepared_t *prepared,
@@ -146,14 +161,21 @@ esp_base_ota_firmware_result_t esp_base_ota_observe_firmware_set(
              memcmp(target_sha256, running_sha256, EOTA_SHA256_BYTES) == 0)) {
             return ESP_BASE_OTA_FIRMWARE_UNCERTAIN;
         }
-    } else if (target_result != EOTA_UPDATE_IMAGE_INVALID) {
+    } else if (target_result != EOTA_UPDATE_IMAGE_INVALID ||
+               !erased_inactive_image(before.target_subtype,
+                                      before.target_address_bytes,
+                                      before.target_size_bytes)) {
         return ESP_BASE_OTA_FIRMWARE_UNCERTAIN;
     }
 
     eota_slots_t after;
     if (eota_observe_slots(&policy, &after) != EOTA_UPDATE_OK ||
         !same_slots(&before, &after) ||
-        (has_rollback && !esp_ota_check_rollback_is_possible())) {
+        (has_rollback && !esp_ota_check_rollback_is_possible()) ||
+        (!has_rollback && !prepared_candidate &&
+         !erased_inactive_image(after.target_subtype,
+                                after.target_address_bytes,
+                                after.target_size_bytes))) {
         return ESP_BASE_OTA_FIRMWARE_UNCERTAIN;
     }
 

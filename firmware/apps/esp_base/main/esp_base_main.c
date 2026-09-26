@@ -14,6 +14,8 @@
 #include "esp_base_identity.h"
 #include "esp_base_container_product.h"
 #include "eota.h"
+#include "esp_base_ota_policy.h"
+#include "esp_base_ota_receipt.h"
 #include "esp_base_protocol.h"
 #include "esp_base_remote_config.h"
 #include "esp_base_storage_owner.h"
@@ -76,6 +78,72 @@ static esp_err_t wait_for_control_start(void)
     return ESP_OK;
 }
 
+/* The durable receipt is the only authority for a target-slot cleanup after
+ * reset. No Container guest has been started in this boot and the startup
+ * claim still serializes all app, otadata and package state changes. */
+static bool reconcile_interrupted_ota(const char *device_id, const char *boot_id,
+                                     bool *needs_success_receipt)
+{
+    *needs_success_receipt = false;
+    if (!eota_available()) return true;
+    esp_base_ota_receipt_recovery_t receipt = {0};
+    const esp_base_ota_receipt_result_t loaded =
+        esp_base_ota_receipt_load_for_recovery(device_id, &receipt);
+    if (loaded == ESP_BASE_OTA_RECEIPT_NOT_FOUND) return true;
+    if (loaded != ESP_BASE_OTA_RECEIPT_OK) return false;
+    if (receipt.status == ESP_BASE_OTA_RECEIPT_FAILED) return true;
+    if ((receipt.status != ESP_BASE_OTA_RECEIPT_PREPARED &&
+         receipt.status != ESP_BASE_OTA_RECEIPT_SUCCEEDED) ||
+        receipt.container_enabled != esp_base_container_product_configured()) {
+        return false;
+    }
+
+    const eota_policy_t policy = esp_base_ota_policy(false);
+    eota_slots_t slots = {0};
+    if (eota_observe_slots(&policy, &slots) != EOTA_UPDATE_OK ||
+        slots.running_subtype != slots.boot_subtype ||
+        slots.running_address_bytes != slots.boot_address_bytes) {
+        return false;
+    }
+    if (slots.running_subtype == receipt.target_subtype) {
+        /* A selected C belongs to pending trial or confirmed recovery. Never
+         * erase it as though it were an interrupted inactive download. */
+        uint8_t digest[EOTA_SHA256_BYTES] = {0};
+        if ((slots.running_state != EOTA_STATE_PENDING_VERIFY &&
+             slots.running_state != EOTA_STATE_VALID) ||
+            (receipt.status == ESP_BASE_OTA_RECEIPT_SUCCEEDED &&
+             slots.running_state != EOTA_STATE_VALID) ||
+            eota_sha256_running(&policy, receipt.image_size_bytes, digest) !=
+                EOTA_UPDATE_OK ||
+            memcmp(digest, receipt.candidate_sha256, sizeof digest) != 0 ||
+            !esp_base_container_product_verify_selected_ota(
+                &s_boot_storage_claim, &receipt, slots.running_state)) {
+            return false;
+        }
+        *needs_success_receipt =
+            receipt.status == ESP_BASE_OTA_RECEIPT_PREPARED;
+        return true;
+    }
+    if (receipt.status != ESP_BASE_OTA_RECEIPT_PREPARED ||
+        slots.running_subtype != receipt.source_subtype ||
+        slots.running_state != EOTA_STATE_VALID ||
+        slots.target_subtype != receipt.target_subtype ||
+        eota_retire_inactive(&policy, receipt.target_subtype,
+                             receipt.source_sha256) != EOTA_UPDATE_OK) {
+        return false;
+    }
+    if (esp_base_container_product_recover_retired_firmware(
+            &s_boot_storage_claim, receipt.container_enabled,
+            receipt.container_sequence, receipt.source_sha256,
+            receipt.inactive_sha256, receipt.candidate_sha256,
+            receipt.operation_id, boot_id) != ESP_BASE_CONTAINER_RETIRE_COMPLETE) {
+        return false;
+    }
+    return esp_base_ota_receipt_record_failure(
+        device_id, receipt.operation_id,
+        EOTA_UPDATE_RESOURCE_FAILURE) == ESP_BASE_OTA_RECEIPT_OK;
+}
+
 void app_main(void)
 {
     /* Hold the same owner as OTA and the optional Container adapter through
@@ -95,7 +163,9 @@ void app_main(void)
         return;
     }
     const bool pending_boot = ota.state == EOTA_STATE_PENDING_VERIFY;
-    esp_base_protocol_set_ota_verification_pending(pending_boot);
+    /* The control task may start before durable receipt recovery finishes.
+     * Keep configuration writes and network owners gated until reconciliation. */
+    esp_base_protocol_set_ota_verification_pending(true);
 
     const esp_err_t storage_status = initialise_nvs();
     if (storage_status != ESP_OK) {
@@ -157,6 +227,15 @@ void app_main(void)
         return;
     }
 
+    bool needs_success_receipt = false;
+    if (!reconcile_interrupted_ota(identity.device_id,
+                                   esp_base_protocol_boot_id(),
+                                   &needs_success_receipt)) {
+        ESP_LOGE(TAG, "ESP_BASE_OTA_RECOVERY_REQUIRED original receipt or slot recovery uncertain");
+        stop_after_local_failure(&ota, pending_boot, "ota_recovery",
+                                 ESP_ERR_INVALID_STATE);
+        return;
+    }
     /* Time is needed by future strict TLS consumers, but it is not part of
      * the pending slot's local self-test and must not block USB control. */
     const esp_err_t time_status = esp_base_time_start(CONFIG_ESP_BASE_TIME_SERVER);
@@ -253,11 +332,17 @@ void app_main(void)
         ESP_LOGE(TAG, "ESP_BASE_CONTAINER_BLOCKED startup claim retained");
         return;
     }
+    if (needs_success_receipt &&
+        esp_base_ota_receipt_record_success(identity.device_id) !=
+            ESP_BASE_OTA_RECEIPT_OK) {
+        ESP_LOGE(TAG, "ESP_BASE_OTA_RECOVERY_REQUIRED success receipt not durable");
+        return;
+    }
     if (!esp_base_storage_release(&s_boot_storage_claim)) {
         ESP_LOGE(TAG, "ESP_BASE_OTA_RECOVERY_REQUIRED storage owner release failed");
         return;
     }
-    if (pending_boot) esp_base_protocol_set_ota_verification_pending(false);
+    esp_base_protocol_set_ota_verification_pending(false);
     ESP_LOGI(TAG, "ESP_BASE_READY hardware_outputs=untouched provisioning=required container=%s",
              product == ESP_BASE_CONTAINER_RUNNING ? "running" :
              product == ESP_BASE_CONTAINER_EMPTY ? "empty" : "not_configured");

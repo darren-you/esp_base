@@ -53,6 +53,7 @@ typedef struct esp_base_ota_receipt_snapshot {
 typedef enum {
     ESP_BASE_OTA_RECEIPT_PREPARED = 1,
     ESP_BASE_OTA_RECEIPT_FAILED = 2,
+    ESP_BASE_OTA_RECEIPT_SUCCEEDED = 3,
 } esp_base_ota_receipt_status_t;
 
 typedef struct {
@@ -87,6 +88,11 @@ esp_base_ota_receipt_result_t esp_base_ota_receipt_load_for_recovery(
  * This function cannot itself prove the caller's Container state. */
 esp_base_ota_receipt_result_t esp_base_ota_receipt_record_failure(
     const char *device_id, const char *operation_id, eota_result_t error);
+/* The caller must first prove OTA VALID and, when Container is configured,
+ * persistent Container confirmation. This independently rechecks C's signed
+ * identity, then commits and reads back the success marker. */
+esp_base_ota_receipt_result_t esp_base_ota_receipt_record_success(
+    const char *device_id);
 esp_base_ota_receipt_result_t esp_base_ota_receipt_query(
     const char *device_id, const char *operation_id, bool worker_active,
     esp_base_ota_receipt_view_t *view);

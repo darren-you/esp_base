@@ -1,6 +1,6 @@
 dependencies:
   esp_container:
-    component_hash: fb676b3138dd06c5daa3ce58568722ffef2835d1c67865468f6bd44634eafa93
+    component_hash: d05904603539411e0d69b397634c355a75133a54e2d31a195bf96701d4c0c5a6
     dependencies:
     - name: idf
       version: ==6.1.0
@@ -11,9 +11,9 @@ dependencies:
       git: https://github.com/esp-space/esp-container.git
       path: components/esp_container
       type: git
-    version: 5c807400c49158c3283686f18617b28f0f962868
+    version: bf52b17a26e51d35a261bf852ac0c9cde76adefc
   esp_frp:
-    component_hash: e442d31eb153efa9390ca0ff71413b9eb10ac53ddf5d9d1b7ce3cf41784754d3
+    component_hash: 73499ebbcae0d4c2efa3fac2f3c2d11a55dbdf00bd7d9d17f9d6a491e18f86d4
     dependencies:
     - name: idf
       version: ==6.1.0
@@ -23,9 +23,9 @@ dependencies:
       git: https://github.com/esp-space/esp-frp.git
       path: .
       type: git
-    version: 1f0c8f37db3765a74b3b95871bb266d0c73d1248
+    version: e5a6b0b5a8f6c908cddd948a3e652045022f5fb6
   esp_ota:
-    component_hash: 5b27cf1e8e8d0933b23ec415924ae43e85710a77e4d887f28d4a6cfd039dee7c
+    component_hash: 541ad5f2fec1178a9d4bc5820e6c48cd087519a6e0a26379195de71435d3b098
     dependencies:
     - name: idf
       version: ==6.1.0
@@ -33,7 +33,7 @@ dependencies:
       git: https://github.com/esp-space/esp-ota.git
       path: components/esp_ota
       type: git
-    version: 207273188b984161362824c3344614e812016836
+    version: 7f316c2a3a71dcae234b046905aee60696a357d3
   espressif/cjson:
     component_hash: e788323270d90738662d66fffa910bfe1fba019bba087f01557e70c40485b469
     dependencies:
@@ -81,6 +81,6 @@ direct_dependencies:
 - esp_ota
 - espressif/cjson
 - mqtt
-manifest_hash: 237babe81c4364830729dbbb0a4699a4dc2446c8ca94fc68df3ffc837d2f3d10
+manifest_hash: 1707fb7f2202b4fc3e7045c07a722bbf030c1d02e8ff6589e198caac96c3a9fd
 target: esp32
 version: 3.0.0

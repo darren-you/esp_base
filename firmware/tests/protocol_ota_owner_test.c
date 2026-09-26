@@ -9,12 +9,16 @@
 
 static esp_base_storage_owner_t owner;
 static esp_base_ota_receipt_result_t register_result, failure_record_result;
-static eota_result_t prepare_result, select_result;
+static eota_result_t prepare_result, select_result, retire_result,
+    validate_result;
 static esp_base_container_stage_result_t stage_result;
-static bool product_configured, product_ota_ready, ota_ready_after_first;
+static esp_base_container_retire_result_t product_retire_result;
+static bool product_configured, product_ota_ready, ota_ready_after_first, snapshot_ok;
 static unsigned ota_ready_calls;
 static bool worker_created;
 static unsigned register_calls, failure_record_calls, task_calls, prepare_calls, stage_calls, select_calls, restart_calls;
+static unsigned snapshot_calls, load_receipt_calls, retire_calls,
+    product_retire_calls, validate_calls;
 static char latest_reply[1200];
 static uint32_t fake_free_heap = 1000;
 
@@ -37,14 +41,18 @@ static void reset_case(void)
     esp_base_control_state_set_ota_pending(&s_control_state, false);
     esp_base_control_state_set_ota_download_active(&s_control_state, false);
     register_result = failure_record_result = ESP_BASE_OTA_RECEIPT_OK;
-    prepare_result = select_result = EOTA_UPDATE_OK;
+    prepare_result = select_result = retire_result = validate_result = EOTA_UPDATE_OK;
     stage_result = ESP_BASE_CONTAINER_STAGE_NOT_CONFIGURED;
+    product_retire_result = ESP_BASE_CONTAINER_RETIRE_COMPLETE;
     product_configured = false;
     product_ota_ready = true;
+    snapshot_ok = true;
     ota_ready_after_first = true;
     ota_ready_calls = 0;
     worker_created = true;
     register_calls = failure_record_calls = task_calls = prepare_calls = stage_calls = select_calls = restart_calls = 0;
+    snapshot_calls = load_receipt_calls = retire_calls = product_retire_calls = 0;
+    validate_calls = 0;
     latest_reply[0] = '\0';
     fake_free_heap = 1000;
 }
@@ -101,6 +109,14 @@ int main(void)
     check_frp_status("expired", 409, "expired");
     check_frp_status("far", 400, "invalid_deadline");
     check_frp_status("invalid", 400, "invalid_request");
+    reset_case();
+    validate_result = EOTA_UPDATE_INVALID_REQUEST;
+    start(19);
+    expect_reply("failed", "invalid_request");
+    assert(validate_calls == 1 && register_calls == 0 && snapshot_calls == 0 &&
+           retire_calls == 0 && task_calls == 0 &&
+           atomic_load(&owner.active_token) == 0);
+
     reset_case();
     esp_base_storage_claim_t other = {0};
     assert(esp_base_storage_claim(&owner, &other));
@@ -160,8 +176,8 @@ int main(void)
     expect_reply("running", NULL);
     assert(atomic_load(&owner.active_token) == s_ota_storage_claim.token);
     poll_ota();
-    expect_reply("failed", "download_failed");
-    assert(failure_record_calls == 1 && atomic_load(&owner.active_token) == 0);
+    expect_reply("unknown", "storage_uncertain");
+    assert(failure_record_calls == 0 && atomic_load(&owner.active_token) == s_ota_storage_claim.token);
 
     reset_case();
     product_configured = true;
@@ -173,6 +189,7 @@ int main(void)
     assert(failure_record_calls == 0 && atomic_load(&owner.active_token) == s_ota_storage_claim.token);
 
     reset_case();
+    product_configured = true;
     stage_result = ESP_BASE_CONTAINER_STAGE_PREPARED;
     start(9);
     assert(stage_calls == 1 && select_calls == 1);
@@ -180,6 +197,7 @@ int main(void)
     assert(restart_calls == 1 && failure_record_calls == 0);
 
     reset_case();
+    product_configured = true;
     stage_result = ESP_BASE_CONTAINER_STAGE_REJECTED;
     start(10);
     assert(stage_calls == 1 && select_calls == 0);
@@ -189,6 +207,7 @@ int main(void)
            atomic_load(&owner.active_token) == s_ota_storage_claim.token);
 
     reset_case();
+    product_configured = true;
     stage_result = ESP_BASE_CONTAINER_STAGE_UNCERTAIN;
     start(11);
     assert(stage_calls == 1 && select_calls == 0);
@@ -198,6 +217,7 @@ int main(void)
            atomic_load(&owner.active_token) == s_ota_storage_claim.token);
 
     reset_case();
+    product_configured = true;
     stage_result = ESP_BASE_CONTAINER_STAGE_PREPARED;
     select_result = EOTA_UPDATE_RESOURCE_FAILURE;
     start(12);
@@ -211,7 +231,7 @@ int main(void)
     start(8);
     assert(prepare_calls == 1 && select_calls == 1);
     poll_ota();
-    expect_reply("unknown", "boot_state_unknown");
+    expect_reply("unknown", "storage_uncertain");
     assert(s_ota_boot_uncertain && failure_record_calls == 0);
     assert(atomic_load(&owner.active_token) == s_ota_storage_claim.token);
 
@@ -224,6 +244,29 @@ int main(void)
     assert(restart_calls == 1 && atomic_load(&owner.active_token) == s_ota_storage_claim.token);
     start(7); /* Admission replay must not register or download again. */
     assert(register_calls == 1 && task_calls == 1);
+    assert(snapshot_calls == 1 && load_receipt_calls == 1 &&
+           retire_calls == 1 && product_retire_calls == 1);
+    reset_case();
+    snapshot_ok = false;
+    start(16);
+    expect_reply("failed", "product_ota_unavailable");
+    assert(snapshot_calls == 1 && register_calls == 0 &&
+           atomic_load(&owner.active_token) == 0);
+
+    reset_case();
+    retire_result = EOTA_UPDATE_BOOT_STATE_UNKNOWN;
+    start(17);
+    poll_ota();
+    expect_reply("unknown", "storage_uncertain");
+    assert(retire_calls == 1 && product_retire_calls == 0 && prepare_calls == 0 &&
+           atomic_load(&owner.active_token) == s_ota_storage_claim.token);
+
+    reset_case();
+    product_retire_result = ESP_BASE_CONTAINER_RETIRE_UNCERTAIN;
+    start(18);
+    poll_ota();
+    expect_reply("unknown", "storage_uncertain");
+    assert(retire_calls == 1 && product_retire_calls == 1 && prepare_calls == 0);
     puts("  protocol_ota_owner passed (busy, receipt failure, worker failure, async success and retained owner)");
 }
 
@@ -277,6 +320,12 @@ psa_status_t psa_hash_compute(int algorithm, const uint8_t *bytes, size_t length
 }
 
 bool eota_available(void) { return true; }
+eota_result_t eota_validate_image_request(const eota_image_t *image)
+{
+    assert(image && image->image_url && image->image_size_bytes > 0);
+    ++validate_calls;
+    return validate_result;
+}
 bool esp_base_wifi_ready(void) { return true; }
 bool esp_base_time_ready(void) { return true; }
 const char *esp_base_wifi_state(void) { return "ready"; }
@@ -294,11 +343,34 @@ bool esp_base_mqtt_owner_result(const char *json, size_t length)
 }
 
 esp_base_ota_receipt_result_t esp_base_ota_receipt_register(
-    const char *device_id, const esp_base_ota_request_t *request)
+    const char *device_id, const esp_base_ota_request_t *request,
+    const esp_base_ota_receipt_snapshot_t *snapshot)
 {
-    assert(device_id && request);
+    assert(device_id && request && snapshot && snapshot->source_sha256[0] == 0xa0);
     ++register_calls;
     return register_result;
+}
+
+esp_base_ota_receipt_result_t esp_base_ota_receipt_load_for_recovery(
+    const char *device_id, esp_base_ota_receipt_recovery_t *receipt)
+{
+    assert(device_id && receipt);
+    ++load_receipt_calls;
+    *receipt = (esp_base_ota_receipt_recovery_t){
+        .status = ESP_BASE_OTA_RECEIPT_PREPARED,
+        .source_subtype = ESP_PARTITION_SUBTYPE_APP_OTA_0,
+        .target_subtype = ESP_PARTITION_SUBTYPE_APP_OTA_1,
+        .image_size_bytes = s_ota_request.image_size_bytes,
+        .container_enabled = product_configured,
+        .container_sequence = 7,
+    };
+    memcpy(receipt->operation_id, s_ota_request.operation_id,
+           sizeof receipt->operation_id);
+    memcpy(receipt->source_sha256,
+           (uint8_t[32]){0xa0}, sizeof receipt->source_sha256);
+    memcpy(receipt->candidate_sha256, s_ota_request.sha256,
+           sizeof receipt->candidate_sha256);
+    return ESP_BASE_OTA_RECEIPT_OK;
 }
 
 esp_base_ota_receipt_result_t esp_base_ota_receipt_record_failure(
@@ -334,6 +406,14 @@ eota_result_t eota_prepare(const eota_policy_t *policy, const eota_image_t *imag
     ++prepare_calls;
     return prepare_result;
 }
+eota_result_t eota_retire_inactive(const eota_policy_t *policy,
+    uint8_t target_subtype, const uint8_t source_sha256[EOTA_SHA256_BYTES])
+{
+    assert(policy && target_subtype == ESP_PARTITION_SUBTYPE_APP_OTA_1 &&
+           source_sha256[0] == 0xa0);
+    ++retire_calls;
+    return retire_result;
+}
 eota_result_t eota_select(const eota_policy_t *policy, const eota_prepared_t *prepared)
 {
     assert(policy && prepared);
@@ -354,6 +434,32 @@ esp_base_container_stage_result_t esp_base_container_product_stage_firmware(
            operation_id != NULL && operation_id[0] == '4');
     ++stage_calls;
     return stage_result;
+}
+
+bool esp_base_container_product_snapshot_for_ota(
+    const esp_base_storage_claim_t *claim,
+    esp_base_ota_receipt_snapshot_t *snapshot)
+{
+    assert(esp_base_storage_claim_active(claim) && snapshot);
+    ++snapshot_calls;
+    *snapshot = (esp_base_ota_receipt_snapshot_t){
+        .container_enabled = product_configured,
+        .container_sequence = 7,
+    };
+    snapshot->source_sha256[0] = 0xa0;
+    return snapshot_ok;
+}
+
+esp_base_container_retire_result_t esp_base_container_product_retire_inactive(
+    const esp_base_storage_claim_t *claim, bool container_enabled,
+    uint32_t expected_sequence, const uint8_t source_sha256[32],
+    const uint8_t inactive_sha256[32])
+{
+    assert(esp_base_storage_claim_active(claim) &&
+           container_enabled == product_configured && expected_sequence == 7 &&
+           source_sha256[0] == 0xa0 && inactive_sha256 != NULL);
+    ++product_retire_calls;
+    return product_retire_result;
 }
 
 bool esp_base_container_product_ota_ready(void)

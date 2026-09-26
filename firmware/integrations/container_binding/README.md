@@ -12,11 +12,15 @@ flowchart LR
     slots --> guest["confirmed 包验签、授权和唯一 pthread"]
     slots --> release["完成启动存储操作后释放 claim"]
     release --> ota["ota.start：同一 owner"]
-    ota --> prepared["prepare 后精确 A/C 观察与 NO_PACKAGE stage"]
+    ota --> receipt["V2 收据：A/B/C 摘要、槽与 ECS2 sequence"]
+    receipt --> retire["eota 擦除旧 B / Container 退役为 A-only"]
+    retire --> prepared["prepare 后精确 A/C 观察与 NO_PACKAGE stage"]
     prepared --> select["选 boot"]
     select --> trial["C pending：BOOT_START_TRIAL / begin_trial"]
     trial --> health["本地窗口 / mark_healthy"]
     health --> confirm["OTA VALID 回读 / Container confirm"]
+    receipt --> recovery["重启在产品装载前按原收据恢复"]
+    recovery -->|"A 仍运行"| retire
 ```
 
 `esp_base_container_with_firmware_set` 使用调用者**已持有**的 Base claim，不再二次 claim。它支持 `CONFIRMED`、`PENDING_TRIAL`，以及仅在 `eota_prepare` 成功后、`eota_select` 前使用精确收据的 `PREPARED_CANDIDATE`；每次逐字段映射实际可启动签名固件集合，执行一次 Container 操作后复读。不一致返回 `UNCERTAIN`。provider 的 NVS/Flash 信号量与 Base 高层 claim 分开。
@@ -25,8 +29,10 @@ flowchart LR
 
 在真实表中 `esp_container_slots_idf_bind` 校验包分区 `data/undefined`、NVS 分区、精确地址/大小、槽几何与可写属性。若指定 NVS key **确实不存在**，启动 claim 下的 `CONFIRMED` 双重观察先验证实际一个或两个签名 Base 固件，再通过公开 `econtainer_slots_initialize` 持久写入对应无包绑定；损坏、读失败或部分授权配置均不会被当成首装。既有绑定经 `reconcile` 对账。confirmed 包随后在唯一 `pthread` 中通过公开 `econtainer_product_open` 回读、映射、验签、验产品和授权，释放映射后执行 `init`；线程轮询已授权 timer 并排出 log。对账与装载结束后释放高层 claim，guest 存活不会长期占用 OTA owner；出错时保持阻断。
 
-当前只允许**持久无包绑定**进入联合固件 OTA。OTA worker 在写 inactive app 前检查产品状态，取得同一 owner；`eota_prepare` 后以收据重新核对 A/C，调用 `econtainer_slots_stage_firmware(NO_PACKAGE)` 持久替换旧备用 B 身份，成功后才 `eota_select`。C 的 `PENDING_VERIFY` boot 必须由 Container 返回精确 `BOOT_START_TRIAL`，先 `begin_trial`，再经过 Base 本地控制进展与稳定窗口、`mark_healthy`、`eota_confirm_pending`、VALID 与签名集合回读，最后 `confirm`。C 已 VALID 而 Container 仍为 `HEALTH_VERIFIED` 的复位恢复，在本 boot 完成本地基本检查后，用持久旧 `trial_boot_id` 补交 confirm。回退至 A 时只选择 A confirmed；在 otadata 表明 C 已未选或失效后显式 `abandon`，仅当签名观察证明 C 不再可启动时才 `drop_aborted_firmware`。完整签名 C 即使标为 otadata 无效，也不会被假定不可启动。
+当前只允许**持久无包绑定**进入联合固件 OTA。`ota.start` 在同一 owner 下取得已对账的签名 A/原独立 B 与 ECS2 sequence，并在写 app 槽前持久登记和读回 V2 收据。worker 重新核对该收据后先调用 `eota_retire_inactive`：擦除确切 inactive 槽首扇区、读回首字节 `0xff`，使旧 B 的 otadata 失效，并核对 A 仍为 VALID 且被选为 boot；然后调用 `econtainer_slots_retire_inactive_firmware` 将 A/B 持久绑定退役为 A-only。原本已是 A-only 时仍验证物理单槽事实和原 sequence。只有退役完成才运行 `eota_prepare` 下载 C，以 prepare 收据重新核对 A/C，调用 `econtainer_slots_stage_firmware(NO_PACKAGE)` 持久 stage，成功后才 `eota_select`。C 的 `PENDING_VERIFY` boot 必须由 Container 返回精确 `BOOT_START_TRIAL`，先 `begin_trial`，再经过 Base 本地控制进展与稳定窗口、`mark_healthy`、`eota_confirm_pending`、VALID 与签名集合回读，最后 `confirm`。C 已 VALID 而 Container 仍为 `HEALTH_VERIFIED` 的复位恢复，在本 boot 完成本地基本检查后，用持久旧 `trial_boot_id` 补交 confirm。
 
-带包产品在 OTA 写 inactive app **之前**拒绝：Base 尚无真实业务事件来源与代表性事件授权，不能以 `init`、平台管理命令或可选 timer 冒充 guest 事件进展。Container 已提供 REUSE 与 WRITE 状态合同，但 Base 目前也没有新包来源；两条路径仍未接线。已确认包的正常启动入口继续可用。若已进入 `eota_prepare` 后发生下载、签名、stage 或选 boot 失败，旧 B 可能已被覆盖；worker 留住本 boot 的 claim 并报告 `unknown/storage_uncertain`，不会当作普通失败释放。**claim 不跨重启**：重启后旧 A 仍可启动，但陈旧 A/B blob 对实际 A/C 或 A/无效 B 的集合对账会阻断产品启动。要自动恢复，仍需在覆盖 B 之前持久写入旧备用身份退役意图及受控恢复合同；本切片不宣称该故障已闭合。
+重启后的启动 claim 在产品装载前读取原 V2 收据。A 仍运行且为 VALID、boot selector 仍指向 A 时，按收据再调用物理退役，清除可能只写了一部分的 C；Container 恢复只接受原 ECS2 sequence 所限定的 A/B 或 A-only，或与原 operation ID、C 摘要和不同 boot ID 相符的 NO_PACKAGE `PREPARED`、`TRIAL_STARTED`、`HEALTH_VERIFIED`、`ABORTED` 状态，必要时执行 `abandon` 和 `drop_aborted_firmware`，最终复读 A-only。三层都对账成功后才把原收据记为 `FAILED` 并继续产品启动。C 已被选中并运行时复核 pending/VALID、完整签名 C 与旧 A 的签名及 IDF 回退资格；配置 Container 时还要核对原 operation、A/C 身份与 ECS2 sequence，绝不把 C 当作 inactive 槽擦除。随后走 trial 或已确认启动，产品确认完成后再持久写入读回 `SUCCEEDED` 收据。旧 V1、损坏或读失败收据、身份/sequence 不匹配和任何存储不确定都阻断产品启动，不能改写成新的空状态。
 
-固定 SDK `578cf89c343e388db43ba1f4ddcd602fedcb763c` 对两目标编译、host ASan/UBSan 测试已通过；产品组件精确锁定 `esp-container@5c807400c49158c3283686f18617b28f0f962868` 与 WAMR `26c235e53e29acd8b43abe7f3b524577bd4d1ae5`。默认 C3 无授权配置的 ELF 不运行 guest。仓外 RSA 测试公钥与 ESP32 候选几何下，未签名离线 ESP32 ELF 含真实 initialize/stage/begin_trial/health/confirm、provider 与 WAMR open/init；`esp_base.bin` 为 943,056 字节，双 `0x120000` app 槽各余 236,592 字节。同一仓外产品测试输入加临时 ECDSA v1 签名键的软件构建为 1,114,100 字节，每槽余 65,548 字节，固定 `espsecure verify-signature --version 1` 验签通过；该键不是设备信任锚或刷机候选。没有持久实板包、网络并发或实板资源测量，不能宣称 guest 或五能力运行验收。
+带包产品在 OTA 写 inactive app **之前**拒绝：Base 尚无真实业务事件来源与代表性事件授权，不能以 `init`、平台管理命令或可选 timer 冒充 guest 事件进展。Container 已提供 REUSE 与 WRITE 状态合同，但 Base 目前也没有新包来源；两条路径仍未接线。已确认包的正常启动入口继续可用。退役、下载、签名、stage 或选 boot 中事实不确定时，worker 留住本 boot 的 claim 并报告 `unknown/storage_uncertain`，不会当作普通失败释放；claim 本身不跨重启，跨重启恢复仅由原 V2 收据授权。上述是软件恢复合同，host 假件不能模拟实板掉电时的 Flash/NVS 原子性、bootloader 后备扫描、双槽迁移或 guest 与 FRP/MQTT 并发。
+
+当前清单精确锁定 `esp-container@bf52b17a26e51d35a261bf852ac0c9cde76adefc` 与 WAMR `26c235e53e29acd8b43abe7f3b524577bd4d1ae5`。此前旧 `esp-container@5c807400c49158c3283686f18617b28f0f962868` 的 943,056 字节未签名 ESP32 产品离线 ELF，以及 1,114,100 字节测试键签名 ESP32 镜像和 ECDSA v1 验签，只是历史证据，不代表当前锁的容量。当前软件恢复接线的构建和测试证据见[开发检查点](../../../docs/operations/development-checkpoint.md)。默认 C3 无包分区与产品授权，不运行 guest；ESP32 仍只有仓外产品测试输入和离线布局。没有持久实板包、掉电恢复或实板资源测量，不能宣称 guest 或五能力运行验收。

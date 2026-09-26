@@ -84,6 +84,7 @@ static esp_base_ota_request_t request(const char *id)
 {
     esp_base_ota_request_t out = {.image_size_bytes = IMAGE_BYTES};
     strcpy(out.operation_id, id);
+    strcpy(out.image_url, "https://updates.example.test/base.bin");
     uint32_t sum = 0;
     for (size_t i = 0; i < sizeof image; ++i) sum += image[i];
     for (size_t i = 0; i < 32; ++i) out.sha256[i] = (uint8_t)(sum + i);
@@ -91,6 +92,13 @@ static esp_base_ota_request_t request(const char *id)
 }
 
 bool eota_available(void) { return signed_enabled; }
+eota_result_t eota_validate_image_request(const eota_image_t *candidate)
+{
+    assert(candidate && candidate->image_url != NULL);
+    return candidate->image_size_bytes >= 512U &&
+           strncmp(candidate->image_url, "https://", 8) == 0 ?
+           EOTA_UPDATE_OK : EOTA_UPDATE_INVALID_REQUEST;
+}
 const char *eota_error(eota_result_t result)
 {
     switch (result) {
@@ -229,14 +237,47 @@ int main(void)
     assert(view.state == ESP_BASE_OTA_OPERATION_RUNNING);
     source_state = EOTA_STATE_VALID;
     assert(esp_base_ota_receipt_query(DEVICE, OP, false, &view) == ESP_BASE_OTA_RECEIPT_OK);
-    assert(view.state == ESP_BASE_OTA_OPERATION_SUCCEEDED && !view.error_code && partition_reads == 1);
+    assert(view.state == ESP_BASE_OTA_OPERATION_UNKNOWN && partition_reads == 0);
+    assert(register_receipt(DEVICE, &next) == ESP_BASE_OTA_RECEIPT_BUSY);
+    assert(esp_base_ota_receipt_record_success(DEVICE) == ESP_BASE_OTA_RECEIPT_OK);
+    assert(esp_base_ota_receipt_load_for_recovery(DEVICE, &recovery) ==
+           ESP_BASE_OTA_RECEIPT_OK &&
+           recovery.status == ESP_BASE_OTA_RECEIPT_SUCCEEDED);
+    assert(esp_base_ota_receipt_record_success(DEVICE) == ESP_BASE_OTA_RECEIPT_OK);
+    assert(esp_base_ota_receipt_record_failure(DEVICE, OP, EOTA_UPDATE_RESOURCE_FAILURE) ==
+           ESP_BASE_OTA_RECEIPT_CONFLICT);
+    assert(esp_base_ota_receipt_query(DEVICE, OP, false, &view) == ESP_BASE_OTA_RECEIPT_OK);
+    assert(view.state == ESP_BASE_OTA_OPERATION_SUCCEEDED && !view.error_code && partition_reads >= 1);
     image[0] ^= 1;
     assert(esp_base_ota_receipt_query(DEVICE, OP, false, &view) == ESP_BASE_OTA_RECEIPT_OK);
     assert(view.state == ESP_BASE_OTA_OPERATION_UNKNOWN);
     image[0] ^= 1;
     target_lookup = ESP_OK; target_state = EOTA_STATE_VALID;
-    assert(register_receipt(DEVICE, &next) == ESP_BASE_OTA_RECEIPT_OK && writes == 2);
+    assert(register_receipt(DEVICE, &next) == ESP_BASE_OTA_RECEIPT_OK && writes == 3);
     assert(esp_base_ota_receipt_query(DEVICE, OP, false, &view) == ESP_BASE_OTA_RECEIPT_NOT_FOUND);
+
+    reset(); ota = request(OP);
+    assert(register_receipt(DEVICE, &ota) == ESP_BASE_OTA_RECEIPT_OK);
+    assert(esp_base_ota_receipt_record_success(DEVICE) ==
+           ESP_BASE_OTA_RECEIPT_TARGET_STATE_UNKNOWN);
+    running_subtype = boot_subtype = ESP_PARTITION_SUBTYPE_APP_OTA_1;
+    source_state = EOTA_STATE_PENDING_VERIFY;
+    assert(esp_base_ota_receipt_record_success(DEVICE) ==
+           ESP_BASE_OTA_RECEIPT_TARGET_STATE_UNKNOWN);
+    source_state = EOTA_STATE_VALID;
+    image[0] ^= 1;
+    assert(esp_base_ota_receipt_record_success(DEVICE) ==
+           ESP_BASE_OTA_RECEIPT_TARGET_STATE_UNKNOWN);
+    image[0] ^= 1;
+    fault = COMMIT_FAULT;
+    assert(esp_base_ota_receipt_record_success(DEVICE) ==
+           ESP_BASE_OTA_RECEIPT_STORAGE_UNCERTAIN);
+    fault = NO_FAULT;
+    assert(esp_base_ota_receipt_query(DEVICE, OP, false, &view) ==
+           ESP_BASE_OTA_RECEIPT_OK && view.state == ESP_BASE_OTA_OPERATION_UNKNOWN);
+    assert(esp_base_ota_receipt_record_success(DEVICE) == ESP_BASE_OTA_RECEIPT_OK);
+    assert(esp_base_ota_receipt_query(DEVICE, OP, false, &view) ==
+           ESP_BASE_OTA_RECEIPT_OK && view.state == ESP_BASE_OTA_OPERATION_SUCCEEDED);
 
     reset(); ota = request(OP);
     assert(register_receipt(DEVICE, &ota) == ESP_BASE_OTA_RECEIPT_OK);
@@ -347,6 +388,15 @@ int main(void)
     firmware_observation_ok = false;
     assert(esp_base_ota_receipt_register(DEVICE, &ota, &current) ==
            ESP_BASE_OTA_RECEIPT_SNAPSHOT_MISMATCH && writes == 0);
+
+    reset(); ota = request(OP);
+    ota.image_size_bytes = 1U;
+    assert(register_receipt(DEVICE, &ota) ==
+           ESP_BASE_OTA_RECEIPT_SLOT_UNAVAILABLE && writes == 0);
+    ota = request(OP);
+    strcpy(ota.image_url, "http://updates.example.test/base.bin");
+    assert(register_receipt(DEVICE, &ota) ==
+           ESP_BASE_OTA_RECEIPT_SLOT_UNAVAILABLE && writes == 0);
 
     reset(); ota = request(OP);
     target_lookup = ESP_OK; target_state = EOTA_STATE_VALID;

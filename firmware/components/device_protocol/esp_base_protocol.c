@@ -375,33 +375,61 @@ static void ota_task(void *argument)
         .image_size_bytes = s_ota_request.image_size_bytes,
     };
     memcpy(image.sha256, s_ota_request.sha256, sizeof image.sha256);
-    eota_prepared_t prepared;
-    eota_result_t result = eota_prepare(&policy, &image, ota_progress, NULL, &prepared);
-    if (result != EOTA_UPDATE_OK && esp_base_container_product_configured()) {
-        /* A failed prepare may still have overwritten the old inactive image.
-         * Its durable package binding cannot be assumed to remain truthful. */
+    esp_base_ota_receipt_recovery_t receipt = {0};
+    eota_result_t result = EOTA_UPDATE_BOOT_STATE_UNKNOWN;
+    if (esp_base_ota_receipt_load_for_recovery(
+            s_context.device_id, &receipt) != ESP_BASE_OTA_RECEIPT_OK ||
+        receipt.status != ESP_BASE_OTA_RECEIPT_PREPARED ||
+        strcmp(receipt.operation_id, s_ota_request.operation_id) != 0 ||
+        receipt.image_size_bytes != image.image_size_bytes ||
+        memcmp(receipt.candidate_sha256, image.sha256, sizeof image.sha256) != 0) {
+        /* A missing or changed durable intent cannot authorize app erasure. */
         atomic_store_explicit(&s_ota_stage_uncertain, true, memory_order_relaxed);
+    } else {
+        /* The original receipt, physical A/B and ECS2 sequence are all known
+         * before the first target write. Retire B physically, then retire its
+         * persistent binding, and only then let IDF download C into the slot. */
+        result = eota_retire_inactive(&policy, receipt.target_subtype,
+                                      receipt.source_sha256);
+        if (result == EOTA_UPDATE_OK &&
+            esp_base_container_product_retire_inactive(
+                &s_ota_storage_claim, receipt.container_enabled,
+                receipt.container_sequence, receipt.source_sha256,
+                receipt.inactive_sha256) != ESP_BASE_CONTAINER_RETIRE_COMPLETE) {
+            result = EOTA_UPDATE_BOOT_STATE_UNKNOWN;
+        }
+        if (result != EOTA_UPDATE_OK) {
+            atomic_store_explicit(&s_ota_stage_uncertain, true,
+                                  memory_order_relaxed);
+        }
     }
     if (result == EOTA_UPDATE_OK) {
+        eota_prepared_t prepared = {0};
+        result = eota_prepare(&policy, &image, ota_progress, NULL, &prepared);
+        if (result != EOTA_UPDATE_OK) {
+            /* The target can contain a partially written C with a bootable
+             * header. Keep the owner until the same receipt is reconciled. */
+            atomic_store_explicit(&s_ota_stage_uncertain, true,
+                                  memory_order_relaxed);
+        }
+        if (result != EOTA_UPDATE_OK) goto done;
         const esp_base_container_stage_result_t stage =
             esp_base_container_product_stage_firmware(
                 &s_ota_storage_claim, &prepared, s_ota_request.operation_id);
-        if (stage == ESP_BASE_CONTAINER_STAGE_NOT_CONFIGURED ||
-            stage == ESP_BASE_CONTAINER_STAGE_PREPARED) {
+        if ((receipt.container_enabled &&
+             stage == ESP_BASE_CONTAINER_STAGE_PREPARED) ||
+            (!receipt.container_enabled &&
+             stage == ESP_BASE_CONTAINER_STAGE_NOT_CONFIGURED)) {
             result = eota_select(&policy, &prepared);
-            if (stage == ESP_BASE_CONTAINER_STAGE_PREPARED &&
-                result != EOTA_UPDATE_OK && result != EOTA_UPDATE_BOOT_STATE_UNKNOWN) {
-                /* The candidate binding is durable; retain the claim until
-                 * boot selection and explicit abandonment can be reconciled. */
+            if (result != EOTA_UPDATE_OK) {
                 atomic_store_explicit(&s_ota_stage_uncertain, true, memory_order_relaxed);
             }
         } else {
-            /* eota_prepare has already overwritten old B. Even a definitive
-             * package-policy rejection leaves B's persisted binding stale. */
             atomic_store_explicit(&s_ota_stage_uncertain, true, memory_order_relaxed);
-            result = EOTA_UPDATE_RESOURCE_FAILURE;
+            result = EOTA_UPDATE_BOOT_STATE_UNKNOWN;
         }
     }
+done:
     atomic_store_explicit(&s_ota_result, result, memory_order_relaxed);
     atomic_store_explicit(&s_ota_done, true, memory_order_release);
     vTaskDelete(NULL);
@@ -526,6 +554,14 @@ static void handle_line(const char *line, size_t length, void *context)
     }
     if (command.kind == EBASE_OTA_START) {
         if (!eota_available()) { save_outcome(slot, "failed", "ota_signing_unavailable", false); return; }
+        eota_image_t candidate = {
+            .image_url = command.ota.image_url,
+            .image_size_bytes = command.ota.image_size_bytes,
+        };
+        memcpy(candidate.sha256, command.ota.sha256, sizeof candidate.sha256);
+        if (eota_validate_image_request(&candidate) != EOTA_UPDATE_OK) {
+            save_outcome(slot, "failed", "invalid_request", false); return;
+        }
         if (esp_base_control_state_ota_pending(&s_control_state)) { save_outcome(slot, "failed", "ota_verification_pending", false); return; }
         if (s_ota_active) { save_outcome(slot, "failed", "ota_in_progress", false); return; }
         if (s_trial_active) { save_outcome(slot, "failed", "configuration_busy", false); return; }
@@ -539,7 +575,17 @@ static void handle_line(const char *line, size_t length, void *context)
         if (!esp_base_storage_claim(s_context.storage_owner, &s_ota_storage_claim)) {
             save_outcome(slot, "failed", "operation_busy", false); return;
         }
-        const esp_base_ota_receipt_result_t receipt = esp_base_ota_receipt_register(s_context.device_id, &command.ota);
+        esp_base_ota_receipt_snapshot_t snapshot = {0};
+        if (!esp_base_container_product_snapshot_for_ota(
+                &s_ota_storage_claim, &snapshot)) {
+            const bool released = esp_base_storage_release(&s_ota_storage_claim);
+            if (!released) s_config_uncertain = true;
+            save_outcome(slot, released ? "failed" : "unknown",
+                         released ? "product_ota_unavailable" : "storage_uncertain", false);
+            return;
+        }
+        const esp_base_ota_receipt_result_t receipt = esp_base_ota_receipt_register(
+            s_context.device_id, &command.ota, &snapshot);
         if (receipt != ESP_BASE_OTA_RECEIPT_OK) {
             const char *receipt_error = receipt == ESP_BASE_OTA_RECEIPT_EXISTS ? "ota_operation_exists" :
                 receipt == ESP_BASE_OTA_RECEIPT_CONFLICT ? "ota_operation_conflict" :
@@ -549,6 +595,7 @@ static void handle_line(const char *line, size_t length, void *context)
                 receipt == ESP_BASE_OTA_RECEIPT_SOURCE_NOT_VALID ? "ota_source_not_valid" :
                 receipt == ESP_BASE_OTA_RECEIPT_TARGET_NOT_SAFE ? "ota_target_not_safe" :
                 receipt == ESP_BASE_OTA_RECEIPT_TARGET_STATE_UNKNOWN ? "ota_target_state_unknown" :
+                receipt == ESP_BASE_OTA_RECEIPT_SNAPSHOT_MISMATCH ? "ota_snapshot_mismatch" :
                 receipt == ESP_BASE_OTA_RECEIPT_STORAGE_FAILURE ? "storage_failure" : "storage_uncertain";
             bool uncertain = receipt == ESP_BASE_OTA_RECEIPT_STORAGE_UNCERTAIN;
             if (!uncertain && !esp_base_storage_release(&s_ota_storage_claim)) uncertain = true;

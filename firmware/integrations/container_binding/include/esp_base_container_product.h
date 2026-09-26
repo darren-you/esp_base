@@ -76,6 +76,14 @@ esp_base_container_retire_result_t esp_base_container_product_recover_retired_fi
     const char operation_id[ESP_BASE_OTA_OPERATION_ID_BYTES],
     const char boot_id[37]);
 
+/* Before starting a guest on selected C, bind the original V2 receipt to the
+ * exact A/C ECS2 transition and sequence. A successful prior receipt requires
+ * a durable CONFIRMED phase; a PREPARED receipt may resume only the precise
+ * pending trial or a VALID C awaiting/after Container confirmation. */
+bool esp_base_container_product_verify_selected_ota(
+    const esp_base_storage_claim_t *claim,
+    const esp_base_ota_receipt_recovery_t *receipt, eota_state_t running_state);
+
 typedef enum {
     ESP_BASE_CONTAINER_STAGE_NOT_CONFIGURED = 0,
     ESP_BASE_CONTAINER_STAGE_PREPARED,

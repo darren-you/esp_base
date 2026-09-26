@@ -138,7 +138,7 @@ fi
   "$ROOT/components/device_protocol/control_state.c" "$ROOT/tests/control_state_test.c" \
   -o "$BUILD_DIR/control_state_test"
 "$BUILD_DIR/control_state_test"
-"${CC:-cc}" -std=c11 -Wall -Wextra -Werror -fsanitize=address,undefined \
+"${CC:-cc}" -std=c11 -D"$TARGET_DEFINE"=1 -Wall -Wextra -Werror -fsanitize=address,undefined \
   -I "$ROOT/tests/fakes/app_main" -I "$ROOT/tests/fakes" \
   -I "$ROOT/components/device_identity/include" -I "$ROOT/components/device_protocol/include" \
   -I "$EOTA_DIR/include" -I "$ROOT/components/remote_config/include" \

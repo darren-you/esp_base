@@ -113,6 +113,20 @@ fi
   "$ROOT/integrations/container_binding/esp_base_container_binding.c" \
   "$ROOT/tests/container_binding_test.c" -o "$BUILD_DIR/container_binding_test"
 "$BUILD_DIR/container_binding_test"
+"${CC:-cc}" -std=c11 -D_POSIX_C_SOURCE=200809L -D"$TARGET_DEFINE"=1 \
+  -Wall -Wextra -Werror -fsanitize=address,undefined \
+  -ffunction-sections -fdata-sections "${PROTOCOL_LINK_GC[@]}" \
+  -I "$ROOT/tests/fakes/container_product" -I "$ROOT/tests/fakes" \
+  -I "$ROOT/integrations/container_binding" \
+  -I "$ROOT/integrations/container_binding/include" \
+  -I "$ROOT/components/ota_operation/include" \
+  -I "$EOTA_DIR/include" \
+  -I "$ROOT/managed_components/esp_container/include" \
+  "$ROOT/components/ota_operation/esp_base_storage_owner.c" \
+  "$ROOT/integrations/container_binding/esp_base_container_binding.c" \
+  "$ROOT/tests/container_product_retire_test.c" \
+  -o "$BUILD_DIR/container_product_retire_test"
+"$BUILD_DIR/container_product_retire_test"
 "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -fsanitize=address,undefined \
   -I "$ROOT/integrations/container_binding" \
   -I "$ROOT/managed_components/esp_container/include" \

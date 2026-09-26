@@ -42,6 +42,7 @@ typedef struct {
     atomic_bool instance_active;
     atomic_bool boot_admitted;
     bool stop_succeeded;
+    bool provider_bound;
 } product_context_t;
 
 static product_context_t s_product;
@@ -626,31 +627,19 @@ static void *product_thread(void *unused)
     return NULL;
 }
 
-static esp_base_container_boot_result_t start_product(
-    const esp_base_storage_claim_t *claim, bool trial_mode, const char boot_id[37])
+static bool ensure_provider(const esp_base_storage_claim_t *claim)
 {
-    if (!esp_base_storage_claim_active(claim)) return ESP_BASE_CONTAINER_BLOCKED;
-    if (!policy_present()) return ESP_BASE_CONTAINER_NOT_CONFIGURED;
-    if (s_product.ready != NULL || s_product.storage_lock != NULL) {
-        return ESP_BASE_CONTAINER_BLOCKED;
-    }
+    if (!esp_base_storage_claim_active(claim) || !policy_present()) return false;
+    if (s_product.provider_bound) return true;
+    /* A failed bind leaves this boot blocked. Do not replace a lock which may
+     * already be referenced by the provider or retry with partial state. */
+    if (s_product.storage_lock != NULL) return false;
     if (!configure_policy()) {
         ESP_LOGE(TAG, "ESP_BASE_CONTAINER_BLOCKED incomplete product authorization");
-        return ESP_BASE_CONTAINER_BLOCKED;
+        return false;
     }
-    s_product.trial_mode = trial_mode;
-    atomic_store_explicit(&s_product.stop_requested, false, memory_order_relaxed);
-    atomic_store_explicit(&s_product.instance_active, false, memory_order_relaxed);
-    atomic_store_explicit(&s_product.boot_admitted, false, memory_order_relaxed);
-    atomic_store_explicit(&s_product.result, ESP_BASE_CONTAINER_BLOCKED,
-                          memory_order_relaxed);
-    if (!decode_uuid(boot_id, s_product.boot_id)) {
-        ESP_LOGE(TAG, "ESP_BASE_CONTAINER_BLOCKED invalid boot identity");
-        return ESP_BASE_CONTAINER_BLOCKED;
-    }
-    s_product.claim = claim;
     s_product.storage_lock = xSemaphoreCreateMutex();
-    if (s_product.storage_lock == NULL) return ESP_BASE_CONTAINER_BLOCKED;
+    if (s_product.storage_lock == NULL) return false;
     const econtainer_slots_idf_config_t config = {
         .package_partition_label = CONFIG_ESP_BASE_CONTAINER_PACKAGE_LABEL,
         .package_partition_offset_bytes = CONFIG_ESP_BASE_CONTAINER_PACKAGE_OFFSET,
@@ -670,8 +659,340 @@ static esp_base_container_boot_result_t start_product(
     if (!econtainer_slots_idf_bind(&s_product.provider, &config) ||
         nvs_flash_init_partition(CONFIG_ESP_BASE_CONTAINER_NVS_LABEL) != ESP_OK) {
         ESP_LOGE(TAG, "ESP_BASE_CONTAINER_BLOCKED unapproved partition or NVS");
+        return false;
+    }
+    s_product.provider_bound = true;
+    return true;
+}
+
+static bool digest_zero(const uint8_t sha256[32])
+{
+    uint8_t value = 0;
+    for (size_t index = 0; index < 32U; ++index) value |= sha256[index];
+    return value == 0U;
+}
+
+/* Check the entire ECS2 identity set, not only a matching running entry.
+ * The inactive confirmed package may exist at snapshot time; its reference
+ * is validated by reconcile/retire before its binding is removed. */
+static bool state_has_firmware(const econtainer_slots_state_t *state,
+                               const uint8_t source_sha256[32],
+                               const uint8_t other_sha256[32],
+                               bool other_must_be_unpacked)
+{
+    bool source_found = false;
+    bool other_found = false;
+    const bool has_other = !digest_zero(other_sha256);
+    for (size_t index = 0; index < ECONTAINER_SLOT_BINDING_COUNT; ++index) {
+        const econtainer_slot_binding_t *binding = &state->bindings[index];
+        if (!binding->present) continue;
+        if (memcmp(binding->firmware_sha256, source_sha256, 32) == 0) {
+            if (source_found || binding->package_present) return false;
+            source_found = true;
+        } else if (has_other &&
+                   memcmp(binding->firmware_sha256, other_sha256, 32) == 0) {
+            if (other_found || (other_must_be_unpacked && binding->package_present))
+                return false;
+            other_found = true;
+        } else {
+            return false;
+        }
+    }
+    return source_found && other_found == has_other;
+}
+
+static econtainer_slots_result_t verified_a_only(
+    const econtainer_slot_firmware_set_t *firmware_set)
+{
+    econtainer_slots_state_t state = {0};
+    econtainer_slot_boot_decision_t decision = ECONTAINER_SLOT_BOOT_BLOCKED;
+    const econtainer_slots_result_t result = econtainer_slots_reconcile(
+        &s_product.provider.io, &s_product.provider.geometry,
+        firmware_set, &state, &decision);
+    if (result != ECONTAINER_SLOTS_OK) return result;
+    return state.phase == ECONTAINER_SLOT_IDLE &&
+           decision == ECONTAINER_SLOT_BOOT_CONFIRMED &&
+           state_has_firmware(&state, firmware_set->running_firmware_sha256,
+                              (const uint8_t[32]){0}, false) ?
+           ECONTAINER_SLOTS_OK : ECONTAINER_SLOTS_CONFLICT;
+}
+
+typedef struct {
+    bool container_enabled;
+    esp_base_ota_receipt_snapshot_t *snapshot;
+} snapshot_context_t;
+
+static econtainer_slots_result_t snapshot_for_ota(
+    const econtainer_slot_firmware_set_t *firmware_set, void *context)
+{
+    snapshot_context_t *entry = context;
+    esp_base_ota_receipt_snapshot_t *snapshot = entry->snapshot;
+    if (firmware_set->bootable_count < 1U || firmware_set->bootable_count > 2U)
+        return ECONTAINER_SLOTS_CONFLICT;
+    memcpy(snapshot->source_sha256, firmware_set->running_firmware_sha256, 32);
+    if (firmware_set->bootable_count == 2U)
+        memcpy(snapshot->inactive_sha256, firmware_set->bootable_firmware_sha256[1], 32);
+    if (!entry->container_enabled) return ECONTAINER_SLOTS_OK;
+
+    econtainer_slots_state_t state = {0};
+    econtainer_slot_boot_decision_t decision = ECONTAINER_SLOT_BOOT_BLOCKED;
+    const econtainer_slots_result_t result = econtainer_slots_reconcile(
+        &s_product.provider.io, &s_product.provider.geometry,
+        firmware_set, &state, &decision);
+    if (result != ECONTAINER_SLOTS_OK) return result;
+    if (state.sequence == 0U ||
+        (state.phase != ECONTAINER_SLOT_IDLE && state.phase != ECONTAINER_SLOT_CONFIRMED) ||
+        decision != ECONTAINER_SLOT_BOOT_CONFIRMED ||
+        !state_has_firmware(&state, snapshot->source_sha256,
+                            snapshot->inactive_sha256, false))
+        return ECONTAINER_SLOTS_CONFLICT;
+    /* A-only after a previous retirement is IDLE. An A-only CONFIRMED blob
+     * would have lost a previous candidate without an explicit transition. */
+    if (firmware_set->bootable_count == 1U && state.phase != ECONTAINER_SLOT_IDLE)
+        return ECONTAINER_SLOTS_CONFLICT;
+    snapshot->container_enabled = true;
+    snapshot->container_sequence = state.sequence;
+    return ECONTAINER_SLOTS_OK;
+}
+
+bool esp_base_container_product_snapshot_for_ota(
+    const esp_base_storage_claim_t *claim,
+    esp_base_ota_receipt_snapshot_t *snapshot)
+{
+    if (snapshot == NULL) return false;
+    *snapshot = (esp_base_ota_receipt_snapshot_t){0};
+    if (!esp_base_storage_claim_active(claim)) return false;
+    const bool configured = policy_present();
+    if (configured &&
+        (!s_product.provider_bound || !esp_base_container_product_ota_ready()))
+        return false;
+    snapshot_context_t context = {.container_enabled = configured, .snapshot = snapshot};
+    const econtainer_slots_result_t result = esp_base_container_with_firmware_set(
+        claim, ESP_BASE_OTA_FIRMWARE_CONFIRMED, NULL, snapshot_for_ota, &context);
+    if (result == ECONTAINER_SLOTS_OK) return true;
+    *snapshot = (esp_base_ota_receipt_snapshot_t){0};
+    ESP_LOGE(TAG, "ESP_BASE_CONTAINER_SNAPSHOT_BLOCKED result=%d", (int)result);
+    return false;
+}
+
+static esp_base_container_retire_result_t retire_result(econtainer_slots_result_t result)
+{
+    if (result == ECONTAINER_SLOTS_OK) return ESP_BASE_CONTAINER_RETIRE_COMPLETE;
+    if (result == ECONTAINER_SLOTS_CONFLICT || result == ECONTAINER_SLOTS_UNTRUSTED ||
+        result == ECONTAINER_SLOTS_EMPTY || result == ECONTAINER_SLOTS_INVALID ||
+        result == ECONTAINER_SLOTS_NO_SPACE) return ESP_BASE_CONTAINER_RETIRE_BLOCKED;
+    return ESP_BASE_CONTAINER_RETIRE_UNCERTAIN;
+}
+
+typedef struct {
+    uint32_t expected_sequence;
+    const uint8_t *source_sha256;
+    const uint8_t *inactive_sha256;
+} retire_context_t;
+
+static econtainer_slots_result_t verify_source_only(
+    const econtainer_slot_firmware_set_t *firmware_set, void *context)
+{
+    const retire_context_t *retire = context;
+    return firmware_set->bootable_count == 1U &&
+           memcmp(firmware_set->running_firmware_sha256,
+                  retire->source_sha256, 32) == 0 ?
+           ECONTAINER_SLOTS_OK : ECONTAINER_SLOTS_CONFLICT;
+}
+
+static econtainer_slots_result_t retire_inactive(
+    const econtainer_slot_firmware_set_t *firmware_set, void *context)
+{
+    const retire_context_t *retire = context;
+    if (firmware_set->bootable_count != 1U ||
+        memcmp(firmware_set->running_firmware_sha256, retire->source_sha256, 32) != 0)
+        return ECONTAINER_SLOTS_CONFLICT;
+    econtainer_slots_state_t state = {0};
+    econtainer_slots_result_t result = econtainer_slots_load(
+        &s_product.provider.io, &s_product.provider.geometry, &state);
+    if (result != ECONTAINER_SLOTS_OK) return result;
+    const bool old_inactive = !digest_zero(retire->inactive_sha256);
+    if (old_inactive && state.sequence == retire->expected_sequence &&
+        (state.phase == ECONTAINER_SLOT_IDLE || state.phase == ECONTAINER_SLOT_CONFIRMED) &&
+        state_has_firmware(&state, retire->source_sha256,
+                            retire->inactive_sha256, false)) {
+        result = econtainer_slots_retire_inactive_firmware(
+            &s_product.provider.io, &s_product.provider.geometry,
+            state.sequence, firmware_set, retire->inactive_sha256, &state);
+        if (result != ECONTAINER_SLOTS_OK) return result;
+    } else if (state.sequence != retire->expected_sequence + (old_inactive ? 1U : 0U) ||
+               state.phase != ECONTAINER_SLOT_IDLE ||
+               !state_has_firmware(&state, retire->source_sha256,
+                                   (const uint8_t[32]){0}, false)) {
+        return ECONTAINER_SLOTS_CONFLICT;
+    }
+    return verified_a_only(firmware_set);
+}
+
+esp_base_container_retire_result_t esp_base_container_product_retire_inactive(
+    const esp_base_storage_claim_t *claim, bool container_enabled,
+    uint32_t expected_sequence, const uint8_t source_sha256[32],
+    const uint8_t inactive_sha256[32])
+{
+    if (!esp_base_storage_claim_active(claim) || source_sha256 == NULL ||
+        inactive_sha256 == NULL || digest_zero(source_sha256) ||
+        (!digest_zero(inactive_sha256) &&
+         memcmp(source_sha256, inactive_sha256, 32) == 0) ||
+        policy_present() != container_enabled ||
+        (container_enabled ? expected_sequence == 0U : expected_sequence != 0U))
+        return ESP_BASE_CONTAINER_RETIRE_BLOCKED;
+    if (container_enabled &&
+        (!s_product.provider_bound || !esp_base_container_product_ota_ready()))
+        return ESP_BASE_CONTAINER_RETIRE_BLOCKED;
+    retire_context_t context = {expected_sequence, source_sha256, inactive_sha256};
+    const econtainer_slots_result_t result = esp_base_container_with_firmware_set(
+        claim, ESP_BASE_OTA_FIRMWARE_CONFIRMED, NULL,
+        container_enabled ? retire_inactive :
+            /* With no Container policy, still prove the physical A-only set. */
+            verify_source_only, &context);
+    return retire_result(result);
+}
+
+typedef struct {
+    retire_context_t retire;
+    const uint8_t *candidate_sha256;
+    uint8_t operation_id[ECONTAINER_SLOT_OPERATION_ID_BYTES];
+    uint8_t boot_id[ECONTAINER_SLOT_BOOT_ID_BYTES];
+} recovery_context_t;
+
+static bool exact_recovery_operation(const econtainer_slots_state_t *state,
+                                     const recovery_context_t *recovery)
+{
+    return state->operation.firmware_transition &&
+        state->operation.kind == ECONTAINER_SLOT_NO_PACKAGE &&
+        memcmp(state->operation.operation_id, recovery->operation_id,
+               sizeof recovery->operation_id) == 0 &&
+        memcmp(state->operation.target_firmware_sha256,
+               recovery->candidate_sha256, 32) == 0 &&
+        state_has_firmware(state, recovery->retire.source_sha256,
+                           recovery->candidate_sha256, true) &&
+        /* A trial can be abandoned without a stop callback only on a
+         * different boot, before product_boot creates its guest executor. */
+        memcmp(state->operation.trial_boot_id, recovery->boot_id,
+               sizeof recovery->boot_id) != 0;
+}
+
+static econtainer_slots_result_t recover_retired_firmware(
+    const econtainer_slot_firmware_set_t *firmware_set, void *context)
+{
+    const recovery_context_t *recovery = context;
+    const retire_context_t *retire = &recovery->retire;
+    if (firmware_set->bootable_count != 1U ||
+        memcmp(firmware_set->running_firmware_sha256, retire->source_sha256, 32) != 0)
+        return ECONTAINER_SLOTS_CONFLICT;
+
+    econtainer_slots_state_t state = {0};
+    econtainer_slots_result_t result = econtainer_slots_load(
+        &s_product.provider.io, &s_product.provider.geometry, &state);
+    if (result != ECONTAINER_SLOTS_OK) return result;
+    const bool old_inactive = !digest_zero(retire->inactive_sha256);
+    const uint32_t retired_sequence = retire->expected_sequence +
+                                      (old_inactive ? 1U : 0U);
+    if (old_inactive && state.sequence == retire->expected_sequence &&
+        (state.phase == ECONTAINER_SLOT_IDLE || state.phase == ECONTAINER_SLOT_CONFIRMED) &&
+        state_has_firmware(&state, retire->source_sha256,
+                            retire->inactive_sha256, false)) {
+        return retire_inactive(firmware_set, (void *)retire);
+    }
+    if (state.phase == ECONTAINER_SLOT_IDLE &&
+        state_has_firmware(&state, retire->source_sha256,
+                            (const uint8_t[32]){0}, false)) {
+        const uint32_t delta = state.sequence - retired_sequence;
+        /* 0: retired before prepare; 3/4/5: stage, optional trial/health,
+         * abandon, drop. No other sequence can be attributed to this receipt. */
+        if (delta != 0U && delta != 3U && delta != 4U && delta != 5U)
+            return ECONTAINER_SLOTS_CONFLICT;
+        return verified_a_only(firmware_set);
+    }
+    if (!exact_recovery_operation(&state, recovery)) return ECONTAINER_SLOTS_CONFLICT;
+    const uint32_t delta = state.sequence - retired_sequence;
+    if ((state.phase == ECONTAINER_SLOT_PREPARED && delta != 1U) ||
+        (state.phase == ECONTAINER_SLOT_TRIAL_STARTED && delta != 2U) ||
+        (state.phase == ECONTAINER_SLOT_HEALTH_VERIFIED && delta != 3U) ||
+        (state.phase == ECONTAINER_SLOT_ABORTED &&
+         (delta < 2U || delta > 4U)) ||
+        (state.phase != ECONTAINER_SLOT_PREPARED &&
+         state.phase != ECONTAINER_SLOT_TRIAL_STARTED &&
+         state.phase != ECONTAINER_SLOT_HEALTH_VERIFIED &&
+         state.phase != ECONTAINER_SLOT_ABORTED)) {
+        return ECONTAINER_SLOTS_CONFLICT;
+    }
+    if (state.phase != ECONTAINER_SLOT_ABORTED) {
+        result = econtainer_slots_abandon(
+            &s_product.provider.io, &s_product.provider.geometry,
+            state.sequence, recovery->boot_id, NULL, NULL, &state);
+        if (result != ECONTAINER_SLOTS_OK) return result;
+        if (state.phase != ECONTAINER_SLOT_ABORTED ||
+            !exact_recovery_operation(&state, recovery)) return ECONTAINER_SLOTS_UNCERTAIN;
+    }
+    result = econtainer_slots_drop_aborted_firmware(
+        &s_product.provider.io, &s_product.provider.geometry,
+        state.sequence, firmware_set, &state);
+    if (result != ECONTAINER_SLOTS_OK) return result;
+    if (state.phase != ECONTAINER_SLOT_IDLE ||
+        !state_has_firmware(&state, retire->source_sha256,
+                            (const uint8_t[32]){0}, false))
+        return ECONTAINER_SLOTS_UNCERTAIN;
+    return verified_a_only(firmware_set);
+}
+
+esp_base_container_retire_result_t esp_base_container_product_recover_retired_firmware(
+    const esp_base_storage_claim_t *claim, bool container_enabled,
+    uint32_t expected_sequence, const uint8_t source_sha256[32],
+    const uint8_t inactive_sha256[32], const uint8_t candidate_sha256[32],
+    const char operation_id[ESP_BASE_OTA_OPERATION_ID_BYTES],
+    const char boot_id[37])
+{
+    if (!esp_base_storage_claim_active(claim) || source_sha256 == NULL ||
+        inactive_sha256 == NULL || candidate_sha256 == NULL ||
+        operation_id == NULL || boot_id == NULL || digest_zero(source_sha256) ||
+        digest_zero(candidate_sha256) ||
+        (!digest_zero(inactive_sha256) &&
+         memcmp(source_sha256, inactive_sha256, 32) == 0) ||
+        policy_present() != container_enabled ||
+        (container_enabled ? expected_sequence == 0U : expected_sequence != 0U) ||
+        s_product.ready != NULL ||
+        atomic_load_explicit(&s_product.instance_active, memory_order_acquire))
+        return ESP_BASE_CONTAINER_RETIRE_BLOCKED;
+    recovery_context_t context = {
+        .retire = {expected_sequence, source_sha256, inactive_sha256},
+        .candidate_sha256 = candidate_sha256,
+    };
+    if (!decode_uuid(operation_id, context.operation_id) ||
+        !decode_uuid(boot_id, context.boot_id))
+        return ESP_BASE_CONTAINER_RETIRE_BLOCKED;
+    if (container_enabled && !ensure_provider(claim))
+        return ESP_BASE_CONTAINER_RETIRE_BLOCKED;
+    const econtainer_slots_result_t result = esp_base_container_with_firmware_set(
+        claim, ESP_BASE_OTA_FIRMWARE_CONFIRMED, NULL,
+        container_enabled ? recover_retired_firmware : verify_source_only,
+        container_enabled ? (void *)&context : (void *)&context.retire);
+    return retire_result(result);
+}
+
+static esp_base_container_boot_result_t start_product(
+    const esp_base_storage_claim_t *claim, bool trial_mode, const char boot_id[37])
+{
+    if (!esp_base_storage_claim_active(claim)) return ESP_BASE_CONTAINER_BLOCKED;
+    if (!policy_present()) return ESP_BASE_CONTAINER_NOT_CONFIGURED;
+    if (s_product.ready != NULL) return ESP_BASE_CONTAINER_BLOCKED;
+    if (!decode_uuid(boot_id, s_product.boot_id)) {
+        ESP_LOGE(TAG, "ESP_BASE_CONTAINER_BLOCKED invalid boot identity");
         return ESP_BASE_CONTAINER_BLOCKED;
     }
+    if (!ensure_provider(claim)) return ESP_BASE_CONTAINER_BLOCKED;
+    s_product.trial_mode = trial_mode;
+    atomic_store_explicit(&s_product.stop_requested, false, memory_order_relaxed);
+    atomic_store_explicit(&s_product.instance_active, false, memory_order_relaxed);
+    atomic_store_explicit(&s_product.boot_admitted, false, memory_order_relaxed);
+    atomic_store_explicit(&s_product.result, ESP_BASE_CONTAINER_BLOCKED,
+                          memory_order_relaxed);
+    s_product.claim = claim;
     s_product.ready = xSemaphoreCreateBinary();
     if (s_product.ready == NULL) return ESP_BASE_CONTAINER_BLOCKED;
     s_product.stopped = xSemaphoreCreateBinary();

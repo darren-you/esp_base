@@ -3,6 +3,7 @@
 
 #include "esp_base_storage_owner.h"
 #include "esp_base_ota_policy.h"
+#include "esp_base_ota_receipt.h"
 #include "eota.h"
 
 typedef enum {
@@ -38,6 +39,42 @@ bool esp_base_container_product_stop_trial(const esp_base_storage_claim_t *claim
 bool esp_base_container_product_configured(void);
 /* Reject a blocked or uninitialized product before any inactive-app write. */
 bool esp_base_container_product_ota_ready(void);
+
+/* The caller holds Base's app/otadata claim. A CONFIRMED double observation
+ * supplies exact signed source/inactive digests. With a product policy, the
+ * existing ECS2 blob must reconcile, the running binding must have no package,
+ * and its sequence is copied into the same durable OTA receipt before erase.
+ * No policy still supplies the physical hashes with container_enabled=false. */
+bool esp_base_container_product_snapshot_for_ota(
+    const esp_base_storage_claim_t *claim,
+    esp_base_ota_receipt_snapshot_t *snapshot);
+
+typedef enum {
+    ESP_BASE_CONTAINER_RETIRE_COMPLETE = 0,
+    ESP_BASE_CONTAINER_RETIRE_BLOCKED,
+    ESP_BASE_CONTAINER_RETIRE_UNCERTAIN,
+} esp_base_container_retire_result_t;
+
+/* Called only after eota_retire_inactive has physically erased and read back
+ * the exact inactive app under this claim. It accepts the receipt's A/B -> A
+ * sequence or an already durable A-only state; PREPARED is never consumed on
+ * the OTA worker's same boot. A mismatch retains the claim. */
+esp_base_container_retire_result_t esp_base_container_product_retire_inactive(
+    const esp_base_storage_claim_t *claim, bool container_enabled,
+    uint32_t expected_sequence, const uint8_t source_sha256[32],
+    const uint8_t inactive_sha256[32]);
+
+/* Fresh-boot recovery after physical eota_retire_inactive, before product_boot
+ * creates any guest thread. In addition to A/B and A-only it recognizes only
+ * the same receipt's exact A/C operation, abandons its candidate, then drops
+ * the unbootable C binding. The current boot ID must differ from any recorded
+ * trial boot ID; no live guest may be silently canceled. */
+esp_base_container_retire_result_t esp_base_container_product_recover_retired_firmware(
+    const esp_base_storage_claim_t *claim, bool container_enabled,
+    uint32_t expected_sequence, const uint8_t source_sha256[32],
+    const uint8_t inactive_sha256[32], const uint8_t candidate_sha256[32],
+    const char operation_id[ESP_BASE_OTA_OPERATION_ID_BYTES],
+    const char boot_id[37]);
 
 typedef enum {
     ESP_BASE_CONTAINER_STAGE_NOT_CONFIGURED = 0,

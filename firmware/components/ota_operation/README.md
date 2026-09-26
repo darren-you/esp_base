@@ -2,6 +2,8 @@
 
 Base 自有的 OTA 产品约束、持久 operation 收据和只读固件集合观察。两个 target 均固定项目 `esp_base`：C3 使用 `esp32c3/esp_base`、RSA v2、双 `0x1e0000` 应用槽；ESP32 使用 `esp32/esp_base`、ECDSA v1、双 `0x120000` 应用槽。芯片 ID、槽地址与下载期限由编译目标决定，`ota.start` 请求不能修改这些约束。收据保存在 `base_store/base_ota/operation`，首次目标槽写入前必须 commit 并逐字节读回。同 operation ID 不重新下载，前次结果未决时不覆盖唯一收据。
 
+同一 NVS key 的 V2 收据还保存签名运行 A、原独立备用 B（A-only 或两槽同一签名身份时为零）、目标 C 的摘要，A/B 物理 subtype、C 长度，以及配置 Container 时已对账的 ECS2 sequence。注册使用已持有的串行 owner，消费产品装配提供的 ECS2 snapshot，并立即重复 Base 的 `CONFIRMED` 签名固件集合观察；任一字段不一致就拒绝登记，不擦除任何 app 槽。启动端通过 `esp_base_ota_receipt_load_for_recovery` 读取原 `PREPARED` 意图，只有它可以授权对确切 inactive 槽做断电清理；`FAILED` 是本地中断清理和 ECS2 对账完成后的终态，不授权再次擦槽。旧 V1、损坏或读失败的 blob 一律返回存储不确定，不能当作空 key 或自动写入新操作。`ota.result` 不因目标 otadata 单独变为 `INVALID`／`ABORTED` 就推断失败；未清理的 `PREPARED` 保持 unknown，新操作继续被阻断。
+
 ## 架构拓扑
 
 ```mermaid

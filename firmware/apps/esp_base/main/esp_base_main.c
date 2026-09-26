@@ -11,6 +11,7 @@
 #include "freertos/task.h"
 
 #include "esp_base_identity.h"
+#include "esp_base_container_product.h"
 #include "eota.h"
 #include "esp_base_protocol.h"
 #include "esp_base_remote_config.h"
@@ -158,6 +159,12 @@ void app_main(void)
         ESP_LOGW(TAG, "ESP_BASE_TIME_UNAVAILABLE error=%s", esp_err_to_name(time_status));
     }
 
+    if (pending_boot && esp_base_container_product_pending_blocked()) {
+        ESP_LOGE(TAG, "ESP_BASE_CONTAINER_BLOCKED pending firmware has no durable joint binding");
+        stop_after_local_failure(&ota, true, "container_pending", ESP_ERR_INVALID_STATE);
+        return;
+    }
+
     if (pending_boot) {
         /* Startup checks above are local: no Broker, FRPS or Wi-Fi connection is
          * required. The control task must also make progress throughout this boot. */
@@ -214,10 +221,20 @@ void app_main(void)
             return;
         }
     }
-    if (!esp_base_storage_release(&s_boot_storage_claim)) {
-        ESP_LOGE(TAG, "ESP_BASE_OTA_RECOVERY_REQUIRED storage owner release failed");
+    const esp_base_container_boot_result_t product =
+        esp_base_container_product_boot(&s_boot_storage_claim);
+    if (product == ESP_BASE_CONTAINER_BLOCKED) {
+        ESP_LOGE(TAG, "ESP_BASE_CONTAINER_BLOCKED startup claim retained");
         return;
     }
+    if (product == ESP_BASE_CONTAINER_NOT_CONFIGURED) {
+        if (!esp_base_storage_release(&s_boot_storage_claim)) {
+            ESP_LOGE(TAG, "ESP_BASE_OTA_RECOVERY_REQUIRED storage owner release failed");
+            return;
+        }
+    }
     if (pending_boot) esp_base_protocol_set_ota_verification_pending(false);
-    ESP_LOGI(TAG, "ESP_BASE_READY hardware_outputs=untouched provisioning=required");
+    ESP_LOGI(TAG, "ESP_BASE_READY hardware_outputs=untouched provisioning=required container=%s",
+             product == ESP_BASE_CONTAINER_RUNNING ? "running" :
+             product == ESP_BASE_CONTAINER_EMPTY ? "empty" : "not_configured");
 }

@@ -1,6 +1,6 @@
 # 无业务基座应用
 
-装配身份、完整配置读取、Wi-Fi、SNTP 同步门、槽状态、复位事实、串口心跳及 status/restart/config.set 命令；pending 新槽需通过本地启动检查、控制循环进展与 30 秒窗口才会确认。不配置 GPIO。
+装配身份、完整配置读取、Wi-Fi、SNTP 同步门、槽状态、复位事实、串口心跳及 status/restart/config.set 命令；无包产品的 pending 新槽通过本地启动检查、控制循环进展与 30 秒窗口后确认。配置 Container 产品授权时仅装载现有 confirmed 绑定；pending 在联合 OTA 合同完成前请求回滚。不配置 GPIO。
 
 ## 架构拓扑
 
@@ -12,6 +12,7 @@ flowchart LR
     frp_status --> frp["esp-frp：端点绑定后连接 FRPS"]
     protocol -->|"首轮与最近进展"| main
     main --> ota["esp-ota：pending 确认 / HTTPS / 槽机制"]
+    main --> container["container_binding：确认绑定 / 唯一 guest"]
     receipt["ota_operation：产品约束 / operation 收据"] --> ota
     main --> time["time_runtime：SNTP 启动"]
     protocol -->|"轮询并报告 time_ready"| time

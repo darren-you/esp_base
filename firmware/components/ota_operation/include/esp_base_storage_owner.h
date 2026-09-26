@@ -22,4 +22,5 @@ typedef struct {
 void esp_base_storage_owner_init(esp_base_storage_owner_t *owner);
 bool esp_base_storage_claim(esp_base_storage_owner_t *owner,
                             esp_base_storage_claim_t *claim);
+bool esp_base_storage_claim_active(const esp_base_storage_claim_t *claim);
 bool esp_base_storage_release(esp_base_storage_claim_t *claim);

@@ -21,7 +21,7 @@ flowchart LR
     time --> idf_time["ESP-IDF esp_netif_sntp"]
     ota["esp-ota：HTTPS / 镜像验签 / 槽机制"] --> firmware
     receipt["ota_operation：产品约束 / operation 收据"] --> firmware
-    receipt -->|"只读有效槽 / 完整签名镜像身份"| image_set["可启动固件集合：未来 Container 绑定输入"]
+    receipt -->|"只读有效槽 / 完整签名镜像身份"| image_set["可启动固件集合：Container 确认绑定输入"]
     firmware -->|"控制任务进展 + 30 秒本地窗口"| ota
     state -->|"受控签名构建的 ota.start"| receipt
     receipt -->|"预检 / 准备 / 选槽"| ota
@@ -30,7 +30,7 @@ flowchart LR
     receipt <-->|"operation ID / 摘要与槽事实"| nvs["base_store NVS：base_ota/operation"]
     owner["ota_operation：启动 / OTA 共用串行 owner"] --> receipt
     owner --> slot
-    binding["可选 container_binding：固件集合适配"] -->|"仅显式探针，未装配产品"| container["公开 esp-container：绑定对账 API"]
+    binding["container_binding：确认绑定与产品启动"] -->|"真实分区 / 持久记录 / 签名包"| container["公开 esp-container：槽对账 / WAMR"]
     owner --> binding
     image_set --> binding
     layout["partitions：两目标各自的 4 MiB 双应用槽"] --> firmware
@@ -50,6 +50,8 @@ idf.py -C firmware build
 
 2026-09-26 五仓源码候选已更新 FRP、MQTT、OTA 的唯一依赖锁及可选 Container 清单。C3 专属配置进一步关闭未使用的 SoftAP 并只保留 TLS 客户端：固定 SDK 的普通 C3 构建为 898800 字节，测试键签名 C3 构建为 1052672 字节且 RSA v2 验签通过；Base host ASan/UBSan 全套、离线预检假件 12/12、串口伪终端 5/5 通过。Container 探针只完成组件编译，主应用未链接包操作入口；此后 ESP32 新增独立分区、OTA/ECDSA v1 策略和旧 AT 可逆归档的软件候选，P7-02 五能力运行组合与实板验收尚未完成。各制品 SHA-256、精确锁、可选组件链接范围见[开发检查点](docs/operations/development-checkpoint.md)。
 
+2026-09-27 主应用已接入既有 confirmed Container 绑定的真实启动入口，使用 Base 已持有的 owner、精确分区事实、仓外信任锚及独立授权；缺输入、无绑定和 pending 各自明确处理。固定 SDK 双目标构建和 host 测试通过；仓外 RSA 测试公钥与 ESP32 候选布局使离线 ELF 实际包含 Container open/init、IDF provider 与 WAMR。默认 C3 因没有包分区和产品授权，不可运行 guest。联合 OTA 还缺新固件选 boot 前的候选观察与 Container 持久转换合同，P6-03/P7-02 和实板验收保持未完成。详见[产品装配](firmware/integrations/container_binding/README.md)。
+
 此前低内存与双目标整合候选的普通 C3 构建为 957904 字节、SHA-256 `727cbde420c661cb54fc9ff0c24c119be55bb5845b58022070d5086b6b178a0d`。P1-04 C3 私有双份 Flash 的**真实**只读预检因 `base_store` 后 31 页不是有效 NVS 页而阻断，没有生成 v3 候选。此前 ESP32 仓外副本以临时 ECDSA P-256 测试键构建的签名 Base 为 `0xffff4` 字节，离线验签有效；其早期三包槽各仅 `0x60000`，不能作为目标布局。本轮产品源码使用公开容量报告中的双 `0x120000` app、三 `0x82000` 包槽、16 KiB 旧 AT 原始归档区及 `0x16000` Base NVS；该离线候选不授权刷写。P2-08/P6-03 仍在进行中。
 
 C3 `base_store` 后 31 页的脱敏逐页字节计数和旧 `ota_1` 同字节映射见[异常页只读分类](docs/operations/c3-base-store-page-forensics.md)；来源与处置仍未确认，迁移预检继续阻断。
@@ -66,9 +68,9 @@ ESP32 未签名构建必须显式声明 `ESP_BASE_ESP32_OFFLINE_PROBE=ON` 且关
 
 签名构建的 `ota.start` 在下载前将最近一次 operation ID、设备 ID、完整镜像摘要/长度和双槽写入 `base_store/base_ota/operation` 并读回。只读 `ota.result` 可在新 boot 按原 operation ID 查询：worker 活跃和新槽 pending 为 running，新槽 VALID 且镜像摘要相同才 succeeded，有可核对失败证据才 failed，其余为 unknown。旧回滚镜像若不含此查询代码，工具仍须报告 unknown；本轮没有升级实板上的旧镜像。
 
-签名构建的 `esp_base_ota_observe_firmware_set` 在调用方串行化所有 app/otadata 写入时读取运行、下次启动及另一槽状态，再调用锁定 `esp-ota` 验签并计算完整 signed bin 摘要。已确认模式要求当前槽为 `VALID`；显式 pending trial 模式仅允许当前槽为 `PENDING_VERIFY`、另一槽 `VALID` 且经 IDF 证明可回滚。两种模式均要求下次启动槽等于运行槽，拒绝状态变化与仍可能被 bootloader 回退扫描加载的歧义镜像；pending 身份观察本身不批准业务试运行。当前没有独立包分区或 Container 运行接线，接口的 host 假件与 C3 编译不证明实板启动/回滚。
+签名构建的 `esp_base_ota_observe_firmware_set` 在调用方串行化所有 app/otadata 写入时读取运行、下次启动及另一槽状态，再调用锁定 `esp-ota` 验签并计算完整 signed bin 摘要。已确认模式要求当前槽为 `VALID`；显式 pending trial 模式仅允许当前槽为 `PENDING_VERIFY`、另一槽 `VALID` 且经 IDF 证明可回滚。两种模式均要求下次启动槽等于运行槽，拒绝状态变化与仍可能被 bootloader 回退扫描加载的歧义镜像；pending 身份观察本身不批准业务试运行。C3 当前没有独立包分区；ESP32 仅有离线候选。host 假件和编译不证明实板启动/回滚。
 
-启动与 `ota.start` 现使用同一本次 boot 的串行 owner；可选 [Container 固件集合适配](firmware/integrations/container_binding/README.md)在 claim 内将只读签名集合逐字段送入 Container，并在操作后复读。当前主应用没有包分区或 Container 产品调用方，这只提供可独立验证的接线，不能算三包槽、联合 OTA 或实板验收。
+启动与 `ota.start` 使用同一本次 boot 的串行 owner；[Container 产品装配](firmware/integrations/container_binding/README.md)使用启动已持有的 claim，将已确认签名集合逐字段送入 Container 并复读。产品授权完整时，仅现有持久 confirmed 绑定可装载；pending 固件会请求回滚，联合 OTA 与实板验收尚未闭合。
 
 - [固件入口](firmware/README.md)
 - [设备协议](docs/design/device-protocol.md)

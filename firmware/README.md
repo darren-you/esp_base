@@ -23,7 +23,7 @@ flowchart LR
     receipt <-->|"登记与读回"| nvs["base_store NVS：base_ota/operation"]
     owner["ota_operation：跨任务串行 owner"] --> receipt
     owner --> rollback
-    binding["integrations/container_binding：可选固件集合适配"] -->|"仅探针，未装配主应用"| container["公开 esp-container：绑定对账 API"]
+    binding["integrations/container_binding：确认绑定与产品启动"] -->|"真实 provider / 验签 / WAMR"| container["公开 esp-container：槽与 runtime API"]
     owner --> binding
     receipt --> binding
     main --> safety["safety_runtime：复位事实 / WDT"]
@@ -61,7 +61,7 @@ C3 签名构建要求 `CONFIG_SECURE_SIGNED_APPS_NO_SECURE_BOOT=y`、`CONFIG_SEC
 
 `ota_operation` 另提供只读固件集合观察：已确认模式要求运行槽 `VALID`；显式 pending trial 模式要求运行槽 `PENDING_VERIFY`、另一槽 `VALID` 且 IDF 证明可回滚。两种模式均要求运行槽为当前 boot selector，并对涉及的镜像执行完整 signed bin 验签；已确认模式中若另一槽未受管，只有镜像校验明确无效才输出单固件集合。其它状态或过程中变化返回不确定且清空输出。调用方必须在观察及消费结果期间独占 app/otadata 写入；pending 观察只给联合试运行提供身份事实，当前尚未接入 Container。
 
-本次 boot 的启动检查和 pending 确认持有 `ota_operation` 串行 owner；`ota.start` 在持久登记前取得 claim，跨控制任务与 worker 保持到下载、验签和选择完成。未知选择或存储结果保留 claim；可证明失败并记账后释放。可选 [Container 固件集合适配](integrations/container_binding/README.md)使用同一 owner 包围物理固件观察与 Container 操作，但当前不在主应用调用，不改现有分区或业务包状态。
+本次 boot 的启动检查和 pending 确认持有 `ota_operation` 串行 owner；`ota.start` 在持久登记前取得 claim，跨控制任务与 worker 保持到下载、验签和选择完成。未知选择或存储结果保留 claim；可证明失败并记账后释放。[Container 产品装配](integrations/container_binding/README.md)复用启动已持有的 claim，不二次争抢；策略完整时对现有 confirmed 绑定执行真实分区对账和包验签，随后在 `pthread` 中启动唯一 guest。未具备联合 OTA 合同时保留 owner 阻断新升级。
 
 MQTT 装配要求 `CONFIG_MBEDTLS_HAVE_TIME_DATE=y` 和 `CONFIG_MQTT_REPORT_DELETED_MESSAGES=y`。新 sdkconfig 从 defaults 得到这些值；已有 sdkconfig 若显式关闭，需在 menuconfig 启用，编译器会拒绝缺少日期验证或消息过期通知的配置。
 

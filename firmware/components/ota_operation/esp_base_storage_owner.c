@@ -50,3 +50,11 @@ bool esp_base_storage_release(esp_base_storage_claim_t *claim)
     claim->token = 0U;
     return true;
 }
+
+bool esp_base_storage_claim_active(const esp_base_storage_claim_t *claim)
+{
+    return claim != NULL && claim->owner != NULL && claim->token != 0U &&
+           claim->token != UINT_MAX &&
+           atomic_load_explicit(&claim->owner->active_token, memory_order_acquire) ==
+               claim->token;
+}

@@ -1,0 +1,103 @@
+menu "ESP Base product package policy"
+
+config ESP_BASE_CONTAINER_PRODUCT_ID
+    string "Authorized product ID"
+    default ""
+
+config ESP_BASE_CONTAINER_KEY_ID
+    string "Authorized RSA signing key ID"
+    default ""
+
+config ESP_BASE_CONTAINER_PUBLIC_KEY_DER_HEX
+    string "RSA-3072 PKCS#1 public key DER in hex"
+    default ""
+
+config ESP_BASE_CONTAINER_PACKAGE_LABEL
+    string "Approved package partition label"
+    default ""
+
+config ESP_BASE_CONTAINER_PACKAGE_OFFSET
+    hex "Approved package partition offset"
+    default 0x0
+
+config ESP_BASE_CONTAINER_PACKAGE_SIZE
+    hex "Approved package partition size"
+    default 0x0
+
+config ESP_BASE_CONTAINER_SLOT_0_OFFSET
+    hex "Approved package slot 0 absolute offset"
+    default 0x0
+
+config ESP_BASE_CONTAINER_SLOT_0_SIZE
+    hex "Approved package slot 0 size"
+    default 0x0
+
+config ESP_BASE_CONTAINER_SLOT_1_OFFSET
+    hex "Approved package slot 1 absolute offset"
+    default 0x0
+
+config ESP_BASE_CONTAINER_SLOT_1_SIZE
+    hex "Approved package slot 1 size"
+    default 0x0
+
+config ESP_BASE_CONTAINER_SLOT_2_OFFSET
+    hex "Approved package slot 2 absolute offset"
+    default 0x0
+
+config ESP_BASE_CONTAINER_SLOT_2_SIZE
+    hex "Approved package slot 2 size"
+    default 0x0
+
+config ESP_BASE_CONTAINER_NVS_LABEL
+    string "Approved NVS partition label"
+    default ""
+
+config ESP_BASE_CONTAINER_NVS_OFFSET
+    hex "Approved NVS partition offset"
+    default 0x0
+
+config ESP_BASE_CONTAINER_NVS_SIZE
+    hex "Approved NVS partition size"
+    default 0x0
+
+config ESP_BASE_CONTAINER_MAX_WASM_BYTES
+    int "Maximum signed Wasm bytes"
+    default 0
+
+config ESP_BASE_CONTAINER_MAX_STACK_BYTES
+    int "Maximum guest execution stack bytes"
+    default 0
+
+config ESP_BASE_CONTAINER_MAX_EVENT_QUEUE
+    int "Maximum signed event queue limit"
+    default 0
+
+config ESP_BASE_CONTAINER_MAX_INSTRUCTIONS
+    int "Maximum instructions per guest entry"
+    default 0
+
+config ESP_BASE_CONTAINER_MAX_HOST_CALL_MS
+    int "Maximum signed host call duration in milliseconds"
+    default 0
+
+config ESP_BASE_CONTAINER_ALLOWED_CAPABILITIES
+    hex "Independently granted guest capability bitmask"
+    default 0x0
+
+config ESP_BASE_CONTAINER_MAX_TIMERS
+    int "Maximum guest timers"
+    default 0
+
+config ESP_BASE_CONTAINER_MAX_LOG_BYTES
+    int "Maximum guest log bytes"
+    default 0
+
+config ESP_BASE_CONTAINER_MAX_ENTRY_MS
+    int "Maximum accepted guest entry duration in milliseconds"
+    default 0
+
+config ESP_BASE_CONTAINER_OWNER_STACK_BYTES
+    int "Product pthread stack bytes"
+    default 0
+
+endmenu

@@ -39,34 +39,31 @@ static bool map_firmware_set(const esp_base_ota_firmware_set_t *source,
 }
 
 econtainer_slots_result_t esp_base_container_with_firmware_set(
-    esp_base_storage_owner_t *owner, esp_base_container_operation_fn operation,
-    void *context)
+    const esp_base_storage_claim_t *claim,
+    esp_base_ota_firmware_observation_t observation,
+    esp_base_container_operation_fn operation, void *context)
 {
-    if (owner == NULL || operation == NULL) return ECONTAINER_SLOTS_INVALID;
-    esp_base_storage_claim_t claim = {0};
-    if (!esp_base_storage_claim(owner, &claim)) return ECONTAINER_SLOTS_BUSY;
+    if (operation == NULL ||
+        (observation != ESP_BASE_OTA_FIRMWARE_CONFIRMED &&
+         observation != ESP_BASE_OTA_FIRMWARE_PENDING_TRIAL)) {
+        return ECONTAINER_SLOTS_INVALID;
+    }
+    if (!esp_base_storage_claim_active(claim)) return ECONTAINER_SLOTS_BUSY;
 
     esp_base_ota_firmware_set_t before = {0};
     esp_base_ota_firmware_set_t after = {0};
     econtainer_slot_firmware_set_t mapped = {0};
     econtainer_slots_result_t result = ECONTAINER_SLOTS_UNCERTAIN;
-    bool operation_started = false;
     if (esp_base_ota_observe_firmware_set(
-            ESP_BASE_OTA_FIRMWARE_CONFIRMED, &before) == ESP_BASE_OTA_FIRMWARE_OK &&
+            observation, &before) == ESP_BASE_OTA_FIRMWARE_OK &&
         map_firmware_set(&before, &mapped)) {
-        operation_started = true;
         result = operation(&mapped, context);
         if (esp_base_ota_observe_firmware_set(
-                ESP_BASE_OTA_FIRMWARE_CONFIRMED, &after) != ESP_BASE_OTA_FIRMWARE_OK ||
+                observation, &after) != ESP_BASE_OTA_FIRMWARE_OK ||
             memcmp(&before, &after, sizeof before) != 0) {
             result = ECONTAINER_SLOTS_UNCERTAIN;
         }
     }
-    /* A callback may have committed an NVS marker before reporting unknown.
-     * Keep the owner claimed for this boot instead of allowing OTA or a new
-     * package operation to run on an unproven combination. */
-    if (operation_started && result == ECONTAINER_SLOTS_UNCERTAIN) return result;
-    if (!esp_base_storage_release(&claim)) return ECONTAINER_SLOTS_UNCERTAIN;
     return result;
 }
 
@@ -86,19 +83,21 @@ static econtainer_slots_result_t reconcile_callback(
 }
 
 econtainer_slots_result_t esp_base_container_reconcile(
-    esp_base_storage_owner_t *owner, const econtainer_slots_io_t *io,
+    const esp_base_storage_claim_t *claim,
+    esp_base_ota_firmware_observation_t observation,
+    const econtainer_slots_io_t *io,
     const econtainer_slots_geometry_t *geometry, econtainer_slots_state_t *state,
     econtainer_slot_boot_decision_t *decision)
 {
     if (decision != NULL) *decision = ECONTAINER_SLOT_BOOT_BLOCKED;
     if (state != NULL) *state = (econtainer_slots_state_t){0};
-    if (owner == NULL || io == NULL || geometry == NULL || state == NULL || decision == NULL) {
+    if (claim == NULL || io == NULL || geometry == NULL || state == NULL || decision == NULL) {
         return ECONTAINER_SLOTS_INVALID;
     }
     reconcile_context_t context = {.io = io, .geometry = geometry,
                                    .state = state, .decision = decision};
     const econtainer_slots_result_t result = esp_base_container_with_firmware_set(
-        owner, reconcile_callback, &context);
+        claim, observation, reconcile_callback, &context);
     if (result == ECONTAINER_SLOTS_UNCERTAIN) {
         *state = (econtainer_slots_state_t){0};
         *decision = ECONTAINER_SLOT_BOOT_BLOCKED;

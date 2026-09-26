@@ -1,4 +1,17 @@
 dependencies:
+  esp_container:
+    component_hash: d8bc69bc769d86779c4f5ad4259054513190c5dc00ee9617ac8fea1dd46f7c50
+    dependencies:
+    - name: idf
+      version: ==6.1.0
+    - git: https://github.com/darren-you/wasm-micro-runtime.git
+      name: wasm-micro-runtime
+      version: 26c235e53e29acd8b43abe7f3b524577bd4d1ae5
+    source:
+      git: https://github.com/esp-space/esp-container.git
+      path: components/esp_container
+      type: git
+    version: b8c86afbcf9d5ae827fe1d2cb79d12ad643b38b3
   esp_frp:
     component_hash: e442d31eb153efa9390ca0ff71413b9eb10ac53ddf5d9d1b7ce3cf41784754d3
     dependencies:
@@ -45,11 +58,29 @@ dependencies:
       path: .
       type: git
     version: 9d6d95e779f4f5ff387a6d9b54015bf4e43565f2
+  wasm-micro-runtime:
+    component_hash: a799be27248cadffdee6f6fae988dbdf3f5d423baab0b1008d74b8581b5ed507
+    dependencies:
+    - name: idf
+      version: '>=4.4'
+    source:
+      git: https://github.com/darren-you/wasm-micro-runtime.git
+      path: .
+      type: git
+    targets:
+    - esp32
+    - esp32s3
+    - esp32c3
+    - esp32c6
+    - esp32p4
+    - esp32c5
+    version: 26c235e53e29acd8b43abe7f3b524577bd4d1ae5
 direct_dependencies:
+- esp_container
 - esp_frp
 - esp_ota
 - espressif/cjson
 - mqtt
-manifest_hash: 39999781ca61a72160b52aedfe6de35b4ab227327df98a5deac00203e84c3782
+manifest_hash: 887a1e280a1458199f40021c408541cb9efa7af69cdcfdb39b16db853b7310d6
 target: esp32
 version: 3.0.0

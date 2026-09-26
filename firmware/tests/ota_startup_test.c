@@ -7,6 +7,7 @@
 #include "esp_base_remote_config.h"
 #include "esp_base_safety.h"
 #include "esp_base_time.h"
+#include "esp_base_container_product.h"
 #include "freertos/task.h"
 
 #include <assert.h>
@@ -28,6 +29,9 @@ static unsigned nvs_calls, config_load_calls, protocol_calls, mark_calls, rollba
 static bool protocol_started, control_never_ready, control_stalls;
 static bool control_exits_late, control_pauses_cross_window;
 static bool ota_gate_pending;
+static bool container_pending_blocked;
+static esp_base_container_boot_result_t container_boot_result;
+static unsigned container_boot_calls;
 static esp_base_storage_owner_t *storage_owner;
 static unsigned ota_gate_clears;
 static jmp_buf reboot_target;
@@ -42,6 +46,9 @@ static void reset_case(void)
     control_progress_count = 0;
     nvs_calls = config_load_calls = protocol_calls = mark_calls = rollback_calls = time_calls = ready_logs = recovery_logs = 0;
     protocol_started = control_never_ready = control_stalls = ota_gate_pending = false;
+    container_pending_blocked = false;
+    container_boot_result = ESP_BASE_CONTAINER_NOT_CONFIGURED;
+    container_boot_calls = 0;
     control_exits_late = control_pauses_cross_window = false;
     ota_gate_clears = 0;
     storage_owner = NULL;
@@ -217,6 +224,21 @@ void esp_base_protocol_set_ota_verification_pending(bool pending)
     if (!pending) ++ota_gate_clears;
 }
 
+bool esp_base_container_product_pending_blocked(void)
+{
+    return container_pending_blocked;
+}
+
+esp_base_container_boot_result_t esp_base_container_product_boot(
+    const esp_base_storage_claim_t *claim)
+{
+    ++container_boot_calls;
+    assert(esp_base_storage_claim_active(claim));
+    esp_base_storage_claim_t competing = {0};
+    assert(!esp_base_storage_claim(storage_owner, &competing));
+    return container_boot_result;
+}
+
 static bool rebooted(void)
 {
     if (setjmp(reboot_target) == 0) {
@@ -304,6 +326,32 @@ int main(void)
     rollback_result = ESP_ERR_OTA_ROLLBACK_FAILED;
     assert(!rebooted() && rollback_calls == 1 && recovery_logs == 1);
     assert(image_state == EOTA_STATE_PENDING_VERIFY && ota_gate_pending);
+
+    reset_case();
+    container_pending_blocked = true;
+    assert(rebooted() && rollback_calls == 1 && mark_calls == 0 &&
+           container_boot_calls == 0 && ready_logs == 0);
+
+    reset_case();
+    image_state = EOTA_STATE_VALID;
+    container_boot_result = ESP_BASE_CONTAINER_RUNNING;
+    assert(!rebooted() && container_boot_calls == 1 && ready_logs == 1);
+    esp_base_storage_claim_t running_competitor = {0};
+    assert(!esp_base_storage_claim(storage_owner, &running_competitor));
+
+    reset_case();
+    image_state = EOTA_STATE_VALID;
+    container_boot_result = ESP_BASE_CONTAINER_EMPTY;
+    assert(!rebooted() && container_boot_calls == 1 && ready_logs == 1);
+    esp_base_storage_claim_t empty_competitor = {0};
+    assert(!esp_base_storage_claim(storage_owner, &empty_competitor));
+
+    reset_case();
+    image_state = EOTA_STATE_VALID;
+    container_boot_result = ESP_BASE_CONTAINER_BLOCKED;
+    assert(!rebooted() && container_boot_calls == 1 && ready_logs == 0);
+    esp_base_storage_claim_t blocked_competitor = {0};
+    assert(!esp_base_storage_claim(storage_owner, &blocked_competitor));
 
     puts("  ota_startup passed (startup faults, control progress, rollback, readback)");
 }

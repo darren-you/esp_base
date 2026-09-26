@@ -1,5 +1,6 @@
 #include <inttypes.h>
 #include <stdbool.h>
+#include <string.h>
 
 #include "sdkconfig.h"
 #include "esp_app_desc.h"
@@ -44,6 +45,10 @@ static void stop_after_local_failure(eota_current_t *ota, bool pending_boot,
     if (!pending_boot) {
         return;
     }
+    if (!esp_base_container_product_stop_trial(&s_boot_storage_claim)) {
+        ESP_LOGE(TAG, "ESP_BASE_OTA_RECOVERY_REQUIRED candidate guest still active");
+        return;
+    }
     if (ota->state != EOTA_STATE_PENDING_VERIFY) {
         ESP_LOGE(TAG, "ESP_BASE_OTA_RECOVERY_REQUIRED slot=%s state=%s rollback=not_safe",
                  ota->running_partition ? ota->running_partition : "unknown", eota_state_name(ota->state));
@@ -73,8 +78,8 @@ static esp_err_t wait_for_control_start(void)
 
 void app_main(void)
 {
-    /* Hold the same owner as OTA and the optional Container adapter until
-     * startup has either confirmed the pending slot or reached Base ready. */
+    /* Hold the same owner as OTA and the optional Container adapter through
+     * startup's storage operations. The guest's lifetime is not a claim. */
     esp_base_storage_owner_init(&s_storage_owner);
     s_boot_storage_claim = (esp_base_storage_claim_t){0};
     if (!esp_base_storage_claim(&s_storage_owner, &s_boot_storage_claim)) {
@@ -159,10 +164,15 @@ void app_main(void)
         ESP_LOGW(TAG, "ESP_BASE_TIME_UNAVAILABLE error=%s", esp_err_to_name(time_status));
     }
 
-    if (pending_boot && esp_base_container_product_pending_blocked()) {
-        ESP_LOGE(TAG, "ESP_BASE_CONTAINER_BLOCKED pending firmware has no durable joint binding");
-        stop_after_local_failure(&ota, true, "container_pending", ESP_ERR_INVALID_STATE);
-        return;
+    const bool container_configured = esp_base_container_product_configured();
+    esp_base_container_boot_result_t product = ESP_BASE_CONTAINER_NOT_CONFIGURED;
+    if (pending_boot && container_configured) {
+        product = esp_base_container_product_start_trial(
+            &s_boot_storage_claim, esp_base_protocol_boot_id());
+        if (product == ESP_BASE_CONTAINER_BLOCKED) {
+            stop_after_local_failure(&ota, true, "container_trial", ESP_ERR_INVALID_STATE);
+            return;
+        }
     }
 
     if (pending_boot) {
@@ -212,6 +222,11 @@ void app_main(void)
             stop_after_local_failure(&ota, pending_boot, "control_boundary", ESP_ERR_TIMEOUT);
             return;
         }
+        if (container_configured &&
+            !esp_base_container_product_mark_healthy(&s_boot_storage_claim)) {
+            stop_after_local_failure(&ota, true, "container_health", ESP_ERR_INVALID_STATE);
+            return;
+        }
         now_ms = uptime_ms();
         const esp_err_t confirm_status = now_ms >= stable_started_ms &&
             now_ms - stable_started_ms >= ESP_BASE_OTA_STABLE_WINDOW_MS ?
@@ -220,18 +235,27 @@ void app_main(void)
             stop_after_local_failure(&ota, pending_boot, "confirm", confirm_status);
             return;
         }
+        if (container_configured) {
+            eota_current_t confirmed = {0};
+            if (eota_inspect(&confirmed) != ESP_OK || confirmed.state != EOTA_STATE_VALID ||
+                confirmed.running_partition == NULL || ota.running_partition == NULL ||
+                strcmp(confirmed.running_partition, ota.running_partition) != 0 ||
+                !esp_base_container_product_confirm_firmware(&s_boot_storage_claim)) {
+                ESP_LOGE(TAG, "ESP_BASE_OTA_RECOVERY_REQUIRED VALID/container confirmation readback incomplete");
+                (void)esp_base_container_product_stop_trial(&s_boot_storage_claim);
+                return;
+            }
+        }
     }
-    const esp_base_container_boot_result_t product =
-        esp_base_container_product_boot(&s_boot_storage_claim);
+    if (!pending_boot) product = esp_base_container_product_boot(
+        &s_boot_storage_claim, esp_base_protocol_boot_id());
     if (product == ESP_BASE_CONTAINER_BLOCKED) {
         ESP_LOGE(TAG, "ESP_BASE_CONTAINER_BLOCKED startup claim retained");
         return;
     }
-    if (product == ESP_BASE_CONTAINER_NOT_CONFIGURED) {
-        if (!esp_base_storage_release(&s_boot_storage_claim)) {
-            ESP_LOGE(TAG, "ESP_BASE_OTA_RECOVERY_REQUIRED storage owner release failed");
-            return;
-        }
+    if (!esp_base_storage_release(&s_boot_storage_claim)) {
+        ESP_LOGE(TAG, "ESP_BASE_OTA_RECOVERY_REQUIRED storage owner release failed");
+        return;
     }
     if (pending_boot) esp_base_protocol_set_ota_verification_pending(false);
     ESP_LOGI(TAG, "ESP_BASE_READY hardware_outputs=untouched provisioning=required container=%s",

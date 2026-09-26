@@ -12,5 +12,10 @@ typedef enum {
 } esp_base_container_boot_result_t;
 
 esp_base_container_boot_result_t esp_base_container_product_boot(
-    const esp_base_storage_claim_t *claim);
-bool esp_base_container_product_pending_blocked(void);
+    const esp_base_storage_claim_t *claim, const char boot_id[37]);
+esp_base_container_boot_result_t esp_base_container_product_start_trial(
+    const esp_base_storage_claim_t *claim, const char boot_id[37]);
+bool esp_base_container_product_mark_healthy(const esp_base_storage_claim_t *claim);
+bool esp_base_container_product_confirm_firmware(const esp_base_storage_claim_t *claim);
+bool esp_base_container_product_stop_trial(const esp_base_storage_claim_t *claim);
+bool esp_base_container_product_configured(void);

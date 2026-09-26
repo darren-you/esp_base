@@ -10,8 +10,11 @@
 static esp_base_storage_owner_t owner;
 static esp_base_ota_receipt_result_t register_result, failure_record_result;
 static eota_result_t prepare_result, select_result;
+static esp_base_container_stage_result_t stage_result;
+static bool product_configured, product_ota_ready, ota_ready_after_first;
+static unsigned ota_ready_calls;
 static bool worker_created;
-static unsigned register_calls, failure_record_calls, task_calls, prepare_calls, select_calls, restart_calls;
+static unsigned register_calls, failure_record_calls, task_calls, prepare_calls, stage_calls, select_calls, restart_calls;
 static char latest_reply[1200];
 static uint32_t fake_free_heap = 1000;
 
@@ -29,13 +32,19 @@ static void reset_case(void)
     memset(&s_ota_request, 0, sizeof s_ota_request);
     s_config_uncertain = s_ota_boot_uncertain = s_ota_active = s_trial_active = false;
     atomic_store(&s_ota_done, false);
+    atomic_store(&s_ota_stage_uncertain, false);
     atomic_store(&s_ota_received, 0);
     esp_base_control_state_set_ota_pending(&s_control_state, false);
     esp_base_control_state_set_ota_download_active(&s_control_state, false);
     register_result = failure_record_result = ESP_BASE_OTA_RECEIPT_OK;
     prepare_result = select_result = EOTA_UPDATE_OK;
+    stage_result = ESP_BASE_CONTAINER_STAGE_NOT_CONFIGURED;
+    product_configured = false;
+    product_ota_ready = true;
+    ota_ready_after_first = true;
+    ota_ready_calls = 0;
     worker_created = true;
-    register_calls = failure_record_calls = task_calls = prepare_calls = select_calls = restart_calls = 0;
+    register_calls = failure_record_calls = task_calls = prepare_calls = stage_calls = select_calls = restart_calls = 0;
     latest_reply[0] = '\0';
     fake_free_heap = 1000;
 }
@@ -102,6 +111,22 @@ int main(void)
     assert(esp_base_storage_release(&other));
 
     reset_case();
+    product_ota_ready = false;
+    start(13);
+    expect_reply("failed", "product_ota_unavailable");
+    assert(register_calls == 0 && prepare_calls == 0 && stage_calls == 0);
+    assert(atomic_load(&owner.active_token) == 0);
+
+    reset_case();
+    ota_ready_after_first = false;
+    start(14);
+    poll_ota();
+    expect_reply("failed", "resource_failure");
+    assert(ota_ready_calls == 2 && register_calls == 1 &&
+           prepare_calls == 0 && stage_calls == 0 && select_calls == 0 &&
+           atomic_load(&owner.active_token) == 0);
+
+    reset_case();
     register_result = ESP_BASE_OTA_RECEIPT_SLOT_UNAVAILABLE;
     start(2);
     expect_reply("failed", "ota_slot_unavailable");
@@ -137,6 +162,49 @@ int main(void)
     poll_ota();
     expect_reply("failed", "download_failed");
     assert(failure_record_calls == 1 && atomic_load(&owner.active_token) == 0);
+
+    reset_case();
+    product_configured = true;
+    prepare_result = EOTA_UPDATE_DOWNLOAD_FAILED;
+    start(15);
+    assert(prepare_calls == 1 && stage_calls == 0 && select_calls == 0);
+    poll_ota();
+    expect_reply("unknown", "storage_uncertain");
+    assert(failure_record_calls == 0 && atomic_load(&owner.active_token) == s_ota_storage_claim.token);
+
+    reset_case();
+    stage_result = ESP_BASE_CONTAINER_STAGE_PREPARED;
+    start(9);
+    assert(stage_calls == 1 && select_calls == 1);
+    poll_ota();
+    assert(restart_calls == 1 && failure_record_calls == 0);
+
+    reset_case();
+    stage_result = ESP_BASE_CONTAINER_STAGE_REJECTED;
+    start(10);
+    assert(stage_calls == 1 && select_calls == 0);
+    poll_ota();
+    expect_reply("unknown", "storage_uncertain");
+    assert(failure_record_calls == 0 && s_config_uncertain &&
+           atomic_load(&owner.active_token) == s_ota_storage_claim.token);
+
+    reset_case();
+    stage_result = ESP_BASE_CONTAINER_STAGE_UNCERTAIN;
+    start(11);
+    assert(stage_calls == 1 && select_calls == 0);
+    poll_ota();
+    expect_reply("unknown", "storage_uncertain");
+    assert(failure_record_calls == 0 && s_config_uncertain && s_ota_boot_uncertain &&
+           atomic_load(&owner.active_token) == s_ota_storage_claim.token);
+
+    reset_case();
+    stage_result = ESP_BASE_CONTAINER_STAGE_PREPARED;
+    select_result = EOTA_UPDATE_RESOURCE_FAILURE;
+    start(12);
+    assert(stage_calls == 1 && select_calls == 1);
+    poll_ota();
+    expect_reply("unknown", "storage_uncertain");
+    assert(failure_record_calls == 0 && atomic_load(&owner.active_token) == s_ota_storage_claim.token);
 
     reset_case();
     select_result = EOTA_UPDATE_BOOT_STATE_UNKNOWN;
@@ -274,7 +342,29 @@ eota_result_t eota_select(const eota_policy_t *policy, const eota_prepared_t *pr
 }
 const char *eota_error(eota_result_t result)
 {
-    return result == EOTA_UPDATE_DOWNLOAD_FAILED ? "download_failed" : "boot_state_unknown";
+    return result == EOTA_UPDATE_DOWNLOAD_FAILED ? "download_failed" :
+        result == EOTA_UPDATE_RESOURCE_FAILURE ? "resource_failure" : "boot_state_unknown";
+}
+
+esp_base_container_stage_result_t esp_base_container_product_stage_firmware(
+    const esp_base_storage_claim_t *claim, const eota_prepared_t *prepared,
+    const char operation_id[37])
+{
+    assert(esp_base_storage_claim_active(claim) && prepared != NULL &&
+           operation_id != NULL && operation_id[0] == '4');
+    ++stage_calls;
+    return stage_result;
+}
+
+bool esp_base_container_product_ota_ready(void)
+{
+    ++ota_ready_calls;
+    return product_ota_ready && (ota_ready_calls == 1 || ota_ready_after_first);
+}
+
+bool esp_base_container_product_configured(void)
+{
+    return product_configured;
 }
 
 bool ebase_config_encode(const esp_base_remote_config_t *config,

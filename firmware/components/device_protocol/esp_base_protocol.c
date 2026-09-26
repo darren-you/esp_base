@@ -11,6 +11,7 @@
 #include "esp_base_time.h"
 #include "esp_base_ota_policy.h"
 #include "esp_base_ota_receipt.h"
+#include "esp_base_container_product.h"
 #include "esp_partition.h"
 #include "psa/crypto.h"
 #include <stdatomic.h>
@@ -53,6 +54,7 @@ static esp_base_storage_claim_t s_ota_storage_claim;
 static size_t s_ota_slot;
 static esp_base_ota_request_t s_ota_request;
 static atomic_bool s_ota_done;
+static atomic_bool s_ota_stage_uncertain;
 static atomic_int s_ota_result;
 static atomic_uint_fast32_t s_ota_received;
 static esp_base_control_state_t s_control_state;
@@ -64,6 +66,11 @@ static bool s_reply_mqtt, s_mqtt_revision_set;
 static uint32_t s_mqtt_revision;
 static bool s_frp_revision_set;
 static uint32_t s_frp_revision;
+
+const char *esp_base_protocol_boot_id(void)
+{
+    return s_started && ebase_is_uuid(s_boot_id) ? s_boot_id : NULL;
+}
 static char s_mqtt_result_json[1024], s_mqtt_reported_json[512];
 #define FRP_STATUS_REPLAY_SLOTS 8u
 typedef struct {
@@ -355,6 +362,13 @@ static void ota_progress(uint32_t received, uint32_t total, void *context)
 static void ota_task(void *argument)
 {
     (void)argument;
+    if (!esp_base_container_product_ota_ready()) {
+        atomic_store_explicit(&s_ota_result, EOTA_UPDATE_RESOURCE_FAILURE,
+                              memory_order_relaxed);
+        atomic_store_explicit(&s_ota_done, true, memory_order_release);
+        vTaskDelete(NULL);
+        return;
+    }
     const eota_policy_t policy = esp_base_ota_policy(true);
     eota_image_t image = {
         .image_url = s_ota_request.image_url,
@@ -363,9 +377,30 @@ static void ota_task(void *argument)
     memcpy(image.sha256, s_ota_request.sha256, sizeof image.sha256);
     eota_prepared_t prepared;
     eota_result_t result = eota_prepare(&policy, &image, ota_progress, NULL, &prepared);
+    if (result != EOTA_UPDATE_OK && esp_base_container_product_configured()) {
+        /* A failed prepare may still have overwritten the old inactive image.
+         * Its durable package binding cannot be assumed to remain truthful. */
+        atomic_store_explicit(&s_ota_stage_uncertain, true, memory_order_relaxed);
+    }
     if (result == EOTA_UPDATE_OK) {
-        /* There is no product package binding in this Base-only image. */
-        result = eota_select(&policy, &prepared);
+        const esp_base_container_stage_result_t stage =
+            esp_base_container_product_stage_firmware(
+                &s_ota_storage_claim, &prepared, s_ota_request.operation_id);
+        if (stage == ESP_BASE_CONTAINER_STAGE_NOT_CONFIGURED ||
+            stage == ESP_BASE_CONTAINER_STAGE_PREPARED) {
+            result = eota_select(&policy, &prepared);
+            if (stage == ESP_BASE_CONTAINER_STAGE_PREPARED &&
+                result != EOTA_UPDATE_OK && result != EOTA_UPDATE_BOOT_STATE_UNKNOWN) {
+                /* The candidate binding is durable; retain the claim until
+                 * boot selection and explicit abandonment can be reconciled. */
+                atomic_store_explicit(&s_ota_stage_uncertain, true, memory_order_relaxed);
+            }
+        } else {
+            /* eota_prepare has already overwritten old B. Even a definitive
+             * package-policy rejection leaves B's persisted binding stale. */
+            atomic_store_explicit(&s_ota_stage_uncertain, true, memory_order_relaxed);
+            result = EOTA_UPDATE_RESOURCE_FAILURE;
+        }
     }
     atomic_store_explicit(&s_ota_result, result, memory_order_relaxed);
     atomic_store_explicit(&s_ota_done, true, memory_order_release);
@@ -377,6 +412,16 @@ static void poll_ota(void)
     if (!s_ota_active || !atomic_load_explicit(&s_ota_done, memory_order_acquire)) return;
     const eota_result_t result =
         (eota_result_t)atomic_load_explicit(&s_ota_result, memory_order_relaxed);
+    if (atomic_load_explicit(&s_ota_stage_uncertain, memory_order_relaxed)) {
+        s_config_uncertain = true;
+        s_ota_boot_uncertain = true;
+        esp_base_control_state_set_ota_download_active(&s_control_state, false);
+        s_ota_active = false;
+        atomic_store_explicit(&s_ota_received, 0, memory_order_relaxed);
+        save_outcome(s_ota_slot, "unknown", "storage_uncertain", false);
+        memset(&s_ota_request, 0, sizeof s_ota_request);
+        return;
+    }
     if (result == EOTA_UPDATE_OK) {
         /* The slot is selected but not yet confirmed. A new boot must pass the
          * local self-test and stability window before it becomes valid. */
@@ -486,6 +531,9 @@ static void handle_line(const char *line, size_t length, void *context)
         if (s_trial_active) { save_outcome(slot, "failed", "configuration_busy", false); return; }
         if (s_config_uncertain) { save_outcome(slot, "failed", "storage_uncertain", false); return; }
         if (s_ota_boot_uncertain) { save_outcome(slot, "failed", "ota_boot_state_unknown", false); return; }
+        if (!esp_base_container_product_ota_ready()) {
+            save_outcome(slot, "failed", "product_ota_unavailable", false); return;
+        }
         if (!esp_base_wifi_ready()) { save_outcome(slot, "failed", "network_unavailable", false); return; }
         if (!esp_base_time_ready()) { save_outcome(slot, "failed", "time_unavailable", false); return; }
         if (!esp_base_storage_claim(s_context.storage_owner, &s_ota_storage_claim)) {
@@ -513,6 +561,7 @@ static void handle_line(const char *line, size_t length, void *context)
         s_ota_slot = slot;
         s_ota_active = true;
         atomic_store_explicit(&s_ota_done, false, memory_order_relaxed);
+        atomic_store_explicit(&s_ota_stage_uncertain, false, memory_order_relaxed);
         atomic_store_explicit(&s_ota_received, 0, memory_order_relaxed);
         esp_base_control_state_set_ota_download_active(&s_control_state, true);
         if (xTaskCreate(ota_task, "base_ota", 12288, NULL, 4, NULL) != pdPASS) {

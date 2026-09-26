@@ -114,6 +114,12 @@ fi
   "$ROOT/tests/container_binding_test.c" -o "$BUILD_DIR/container_binding_test"
 "$BUILD_DIR/container_binding_test"
 "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -fsanitize=address,undefined \
+  -I "$ROOT/integrations/container_binding" \
+  -I "$ROOT/managed_components/esp_container/include" \
+  "$ROOT/integrations/container_binding/esp_base_container_no_package.c" \
+  "$ROOT/tests/container_no_package_test.c" -o "$BUILD_DIR/container_no_package_test"
+"$BUILD_DIR/container_no_package_test"
+"${CC:-cc}" -std=c11 -Wall -Wextra -Werror -fsanitize=address,undefined \
   -I "$ROOT/tests/fakes" -I "$ROOT/components/device_protocol" \
   "$ROOT/components/device_protocol/control_state.c" "$ROOT/tests/control_state_test.c" \
   -o "$BUILD_DIR/control_state_test"

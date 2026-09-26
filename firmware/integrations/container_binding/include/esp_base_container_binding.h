@@ -15,6 +15,7 @@ typedef econtainer_slots_result_t (*esp_base_container_operation_fn)(
 econtainer_slots_result_t esp_base_container_with_firmware_set(
     const esp_base_storage_claim_t *claim,
     esp_base_ota_firmware_observation_t observation,
+    const eota_prepared_t *prepared,
     esp_base_container_operation_fn operation, void *context);
 
 /* Startup selection is blocked until the physical signed firmware set and

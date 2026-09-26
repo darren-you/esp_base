@@ -41,11 +41,14 @@ static bool map_firmware_set(const esp_base_ota_firmware_set_t *source,
 econtainer_slots_result_t esp_base_container_with_firmware_set(
     const esp_base_storage_claim_t *claim,
     esp_base_ota_firmware_observation_t observation,
+    const eota_prepared_t *prepared,
     esp_base_container_operation_fn operation, void *context)
 {
     if (operation == NULL ||
         (observation != ESP_BASE_OTA_FIRMWARE_CONFIRMED &&
-         observation != ESP_BASE_OTA_FIRMWARE_PENDING_TRIAL)) {
+         observation != ESP_BASE_OTA_FIRMWARE_PENDING_TRIAL &&
+         observation != ESP_BASE_OTA_FIRMWARE_PREPARED_CANDIDATE) ||
+        (observation == ESP_BASE_OTA_FIRMWARE_PREPARED_CANDIDATE) != (prepared != NULL)) {
         return ECONTAINER_SLOTS_INVALID;
     }
     if (!esp_base_storage_claim_active(claim)) return ECONTAINER_SLOTS_BUSY;
@@ -55,11 +58,11 @@ econtainer_slots_result_t esp_base_container_with_firmware_set(
     econtainer_slot_firmware_set_t mapped = {0};
     econtainer_slots_result_t result = ECONTAINER_SLOTS_UNCERTAIN;
     if (esp_base_ota_observe_firmware_set(
-            observation, NULL, &before) == ESP_BASE_OTA_FIRMWARE_OK &&
+            observation, prepared, &before) == ESP_BASE_OTA_FIRMWARE_OK &&
         map_firmware_set(&before, &mapped)) {
         result = operation(&mapped, context);
         if (esp_base_ota_observe_firmware_set(
-                observation, NULL, &after) != ESP_BASE_OTA_FIRMWARE_OK ||
+                observation, prepared, &after) != ESP_BASE_OTA_FIRMWARE_OK ||
             memcmp(&before, &after, sizeof before) != 0) {
             result = ECONTAINER_SLOTS_UNCERTAIN;
         }
@@ -97,7 +100,7 @@ econtainer_slots_result_t esp_base_container_reconcile(
     reconcile_context_t context = {.io = io, .geometry = geometry,
                                    .state = state, .decision = decision};
     const econtainer_slots_result_t result = esp_base_container_with_firmware_set(
-        claim, observation, reconcile_callback, &context);
+        claim, observation, NULL, reconcile_callback, &context);
     if (result == ECONTAINER_SLOTS_UNCERTAIN) {
         *state = (econtainer_slots_state_t){0};
         *decision = ECONTAINER_SLOT_BOOT_BLOCKED;

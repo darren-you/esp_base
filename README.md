@@ -50,7 +50,7 @@ idf.py -C firmware build
 
 2026-09-26 五仓源码候选已更新 FRP、MQTT、OTA 的唯一依赖锁及可选 Container 清单。C3 专属配置进一步关闭未使用的 SoftAP 并只保留 TLS 客户端：固定 SDK 的普通 C3 构建为 898800 字节，测试键签名 C3 构建为 1052672 字节且 RSA v2 验签通过；Base host ASan/UBSan 全套、离线预检假件 12/12、串口伪终端 5/5 通过。Container 探针只完成组件编译，主应用未链接包操作入口；此后 ESP32 新增独立分区、OTA/ECDSA v1 策略和旧 AT 可逆归档的软件候选，P7-02 五能力运行组合与实板验收尚未完成。各制品 SHA-256、精确锁、可选组件链接范围见[开发检查点](docs/operations/development-checkpoint.md)。
 
-2026-09-27 主应用已接入既有 confirmed Container 绑定的真实启动入口，使用 Base 已持有的 owner、精确分区事实、仓外信任锚及独立授权；缺输入、无绑定和 pending 各自明确处理。固定 SDK 双目标构建和 host 测试通过；仓外 RSA 测试公钥与 ESP32 候选布局使离线 ELF 实际包含 Container open/init、IDF provider 与 WAMR。默认 C3 因没有包分区和产品授权，不可运行 guest。联合 OTA 还缺新固件选 boot 前的候选观察与 Container 持久转换合同，P6-03/P7-02 和实板验收保持未完成。详见[产品装配](firmware/integrations/container_binding/README.md)。
+2026-09-27 主应用已接入 Container 产品入口，使用 Base 已持有的 owner、精确分区事实、仓外信任锚及独立授权。首次启动仅在持久键确实不存在且签名固件集合已确认时初始化无包绑定；现有 confirmed 包可验签启动。无包固件 OTA 在已签名 A/C 的准备收据后持久 stage，pending C 经本地控制窗口、OTA VALID 回读与 Container confirm；带包联合 OTA 在写 inactive app 前拒绝，因为尚无真实业务事件来源。下载中断或准备后失败仍缺覆盖旧 B 之前的持久退役意图，重启对账可能阻断。固定 SDK 双目标构建和 host 测试通过；仓外测试输入下 ESP32 离线 ELF 含真实 Container 与 WAMR 调用。默认 C3 因没有包分区和产品授权不可运行 guest，P6-03/P7-02 与实板验收保持未完成。详见[产品装配](firmware/integrations/container_binding/README.md)。
 
 此前低内存与双目标整合候选的普通 C3 构建为 957904 字节、SHA-256 `727cbde420c661cb54fc9ff0c24c119be55bb5845b58022070d5086b6b178a0d`。P1-04 C3 私有双份 Flash 的**真实**只读预检因 `base_store` 后 31 页不是有效 NVS 页而阻断，没有生成 v3 候选。此前 ESP32 仓外副本以临时 ECDSA P-256 测试键构建的签名 Base 为 `0xffff4` 字节，离线验签有效；其早期三包槽各仅 `0x60000`，不能作为目标布局。本轮产品源码使用公开容量报告中的双 `0x120000` app、三 `0x82000` 包槽、16 KiB 旧 AT 原始归档区及 `0x16000` Base NVS；该离线候选不授权刷写。P2-08/P6-03 仍在进行中。
 
@@ -70,7 +70,7 @@ ESP32 未签名构建必须显式声明 `ESP_BASE_ESP32_OFFLINE_PROBE=ON` 且关
 
 签名构建的 `esp_base_ota_observe_firmware_set` 在调用方串行化所有 app/otadata 写入时读取运行、下次启动及另一槽状态，再调用锁定 `esp-ota` 验签并计算完整 signed bin 摘要。已确认模式要求当前槽为 `VALID`；显式 pending trial 模式仅允许当前槽为 `PENDING_VERIFY`、另一槽 `VALID` 且经 IDF 证明可回滚。新增 prepared candidate 模式只消费本次 `eota_prepare` 成功返回的收据，要求当前 A 已确认且仍被选为 boot，待选 C 的旧 otadata 已失效，重新验签 A/C 并核对 C 的完整长度与摘要；随后仍须在选 boot 前完成 Container 持久绑定。三种观察均拒绝状态变化与歧义；观察本身不批准业务试运行。C3 当前没有独立包分区；ESP32 仅有离线候选。host 假件和编译不证明实板启动/回滚。
 
-启动与 `ota.start` 使用同一本次 boot 的串行 owner；[Container 产品装配](firmware/integrations/container_binding/README.md)使用启动已持有的 claim，将已确认签名集合逐字段送入 Container 并复读。产品授权完整时，仅现有持久 confirmed 绑定可装载；pending 固件会请求回滚，联合 OTA 与实板验收尚未闭合。
+启动与 `ota.start` 使用同一本次 boot 的串行 owner；[Container 产品装配](firmware/integrations/container_binding/README.md)使用启动已持有的 claim，将签名固件集合逐字段送入 Container 并复读。无包初始化、准备后 stage、pending trial 和确认已接线；guest 线程存活不长期占有 claim。带包联合 OTA 与准备中断电恢复仍未闭合，实板验收尚未进行。
 
 - [固件入口](firmware/README.md)
 - [设备协议](docs/design/device-protocol.md)

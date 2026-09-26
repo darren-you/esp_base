@@ -14,9 +14,11 @@ static esp_base_storage_owner_t *shared_owner;
 
 esp_base_ota_firmware_result_t esp_base_ota_observe_firmware_set(
     esp_base_ota_firmware_observation_t observation,
+    const eota_prepared_t *prepared,
     esp_base_ota_firmware_set_t *firmware_set)
 {
     assert(observation == expected_observation);
+    assert(prepared == NULL);
     ++observe_calls;
     *firmware_set = (esp_base_ota_firmware_set_t){0};
     if (observed_result == ESP_BASE_OTA_FIRMWARE_OK) {
@@ -84,6 +86,10 @@ int main(void)
     expected_observation = ESP_BASE_OTA_FIRMWARE_PENDING_TRIAL;
     assert(esp_base_container_with_firmware_set(&claim,
         ESP_BASE_OTA_FIRMWARE_PENDING_TRIAL, inspect_set, &owner) == ECONTAINER_SLOTS_OK);
+    assert(observe_calls == 4U && operation_calls == 2U);
+    assert(esp_base_container_with_firmware_set(&claim,
+        ESP_BASE_OTA_FIRMWARE_PREPARED_CANDIDATE, inspect_set, &owner) ==
+        ECONTAINER_SLOTS_INVALID);
     assert(observe_calls == 4U && operation_calls == 2U);
     expected_observation = ESP_BASE_OTA_FIRMWARE_CONFIRMED;
 

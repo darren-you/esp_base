@@ -22,6 +22,8 @@ flowchart LR
 
 当前实板仍是旧固件，签名首次迁移与真实 HTTPS、Flash、bootloader 回滚尚未验收；构建和 host 假件不代表实板结果。ESP32 的 16 KiB 旧 AT 归档及新分区表只提供离线候选，不允许直接向旧分区执行 OTA。
 
-固件集合接口要求签名构建且调用方串行化 app/otadata 写入。调用方必须显式选择 `CONFIRMED` 或 `PENDING_TRIAL` 观察：前者要求运行槽为已确认 `VALID`；后者只允许运行槽为 `PENDING_VERIFY` 且另一槽确实 `VALID`、经 IDF 证实可回滚，为另行授权的联合试运行提供只读镜像身份，不批准也不启动试运行。两种观察均要求运行槽等于下次启动槽。运行镜像和可回退镜像都须先通过 `eota_sha256_verified_image` 验签，再从精确 app 分区读回镜像头和 app 描述，核对 Base 项目名、芯片 ID、magic 与分区几何；签名身份本身不代表属于此产品。`CONFIRMED` 模式中另一槽为 `UNTRACKED`、`INVALID` 或 `ABORTED` 时，只有 SDK 明确拒绝其镜像才可返回单固件集合。其它状态、可被 bootloader 回退扫描加载但未确认的镜像、读态变化、签名或资源失败都拒绝且清空输出。相同 signed bin 摘要合并为同一固件身份。它不修改槽或发布业务包，也未对真实设备证明启动资格。
+固件集合接口要求签名构建且调用方串行化 app/otadata 写入。调用方显式选择 `CONFIRMED`、`PENDING_TRIAL` 或 `PREPARED_CANDIDATE`：前者要求运行槽已确认 `VALID`；pending 要求运行槽 `PENDING_VERIFY`、另一槽 `VALID` 且经 IDF 证实可回滚。prepared 模式必须由成功的 `eota_prepare` 调用者传入其精确收据，仅用于 prepare 后、`eota_select` 前；A 仍运行且 boot selector 指向 A、状态 `VALID`，C 位于 inactive 槽且旧 otadata 为 `UNTRACKED`／`INVALID`／`ABORTED`，不能仍为 `VALID`、`NEW`、`PENDING_VERIFY` 或 `UNDEFINED`。收据的 prepare 前 A/C 几何、A 状态和原 inactive 状态也须与当时允许写入的事实一致。prepared 模式重新验签 A/C，并以 SDK 报告的完整签名长度、SHA-256 核对收据，拒绝与 A 相同的 C 身份；双次槽观察必须稳定。三种观察均要求运行槽等于下次启动槽。
+
+运行镜像与涉及的另一镜像均通过 `eota_sha256_verified_image` 验签，再从精确 app 分区读回镜像头和 app 描述，核对 Base 项目名、芯片 ID、magic 与分区几何；签名身份本身不代表属于此产品。`CONFIRMED` 模式中另一槽为 `UNTRACKED`、`INVALID` 或 `ABORTED` 时，只有 SDK 明确拒绝其镜像才可返回单固件集合。其它状态、可被 bootloader 回退扫描加载但未确认的镜像、读态变化、签名或资源失败都拒绝且清空输出。相同 signed bin 摘要合并为同一固件身份。接口不修改槽或发布业务包；prepared 身份尚未接入产品 OTA worker，必须等 Container 持久 stage 成功后才能选 boot。Host 测试与双目标编译不证明实板启动资格。
 
 `esp_base_storage_owner` 是本次 boot 内跨任务传递的唯一高层串行 claim：启动检查与 pending 确认、`ota.start` 的收据/下载/选择，以及 Container 产品装配共用它。产品调用方复用启动已持有的 claim；`esp_base_storage_claim_active` 仅检查此 claim，没有二次 claim。claim 不替代 Container provider 自己保护包 NVS/Flash 回调的独立信号量；当前 C3 没有包分区，不能视为包写入已串行化。

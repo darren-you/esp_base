@@ -59,7 +59,7 @@ C3 签名构建要求 `CONFIG_SECURE_SIGNED_APPS_NO_SECURE_BOOT=y`、`CONFIG_SEC
 
 `ota.start` 在目标槽写入前将 operation ID、设备 ID、摘要、长度与源/目标槽作为单 blob 保存到 `base_store` 的 `base_ota/operation`，commit 和读回成功才启动 worker；同 ID 不再次下载。签名构建的只读 `ota.result` 查询最近一次收据，只有新槽本地确认 VALID 且完整运行镜像摘要匹配才成功；回滚到尚无查询代码的旧镜像不能由设备提供最终结果，工具必须记 unknown。身份 NVS 保持原位；配置仍用 `base_config/committed` 单键，v3-only 读写不兼容旧 v1/v2 记录。真实回滚和 NVS 掉电行为待实板验证。
 
-`ota_operation` 另提供只读固件集合观察：已确认模式要求运行槽 `VALID`；显式 pending trial 模式要求运行槽 `PENDING_VERIFY`、另一槽 `VALID` 且 IDF 证明可回滚。两种模式均要求运行槽为当前 boot selector，并对涉及的镜像执行完整 signed bin 验签；已确认模式中若另一槽未受管，只有镜像校验明确无效才输出单固件集合。其它状态或过程中变化返回不确定且清空输出。调用方必须在观察及消费结果期间独占 app/otadata 写入；pending 观察只给联合试运行提供身份事实，当前尚未接入 Container。
+`ota_operation` 另提供只读固件集合观察：已确认模式要求运行槽 `VALID`；显式 pending trial 模式要求运行槽 `PENDING_VERIFY`、另一槽 `VALID` 且 IDF 证明可回滚。prepared candidate 模式需要本次 `eota_prepare` 的收据，要求 A 仍运行且被选为 boot、otadata 为 `VALID`，C 未选 boot 且旧 inactive otadata 已失效；重新验签 A/C 并核对 C 的完整长度/摘要。三种模式都要求运行槽与当前 boot selector 一致，拒绝过程中变化。已确认模式中若另一槽未受管，只有镜像校验明确无效才输出单固件集合。调用方必须在观察及消费结果期间独占 app/otadata 写入；pending/prepared 观察只给联合升级提供身份事实，目前尚未接入产品 OTA worker 和 Container 持久转换。
 
 本次 boot 的启动检查和 pending 确认持有 `ota_operation` 串行 owner；`ota.start` 在持久登记前取得 claim，跨控制任务与 worker 保持到下载、验签和选择完成。未知选择或存储结果保留 claim；可证明失败并记账后释放。[Container 产品装配](integrations/container_binding/README.md)复用启动已持有的 claim，不二次争抢；策略完整时对现有 confirmed 绑定执行真实分区对账和包验签，随后在 `pthread` 中启动唯一 guest。未具备联合 OTA 合同时保留 owner 阻断新升级。
 

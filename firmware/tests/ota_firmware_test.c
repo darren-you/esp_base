@@ -132,8 +132,33 @@ static void expect_uncertain(esp_base_ota_firmware_observation_t observation)
 {
     esp_base_ota_firmware_set_t set;
     memset(&set, 0xff, sizeof set);
-    assert(esp_base_ota_observe_firmware_set(observation, &set) ==
+    assert(esp_base_ota_observe_firmware_set(observation, NULL, &set) ==
            ESP_BASE_OTA_FIRMWARE_UNCERTAIN);
+    const esp_base_ota_firmware_set_t empty = {0};
+    assert(memcmp(&set, &empty, sizeof set) == 0);
+}
+
+static eota_prepared_t prepared_receipt(void)
+{
+    eota_slots_t slots = {0};
+    const eota_policy_t policy = esp_base_ota_policy(false);
+    assert(eota_observe_slots(&policy, &slots) == EOTA_UPDATE_OK);
+    eota_prepared_t prepared = {.slots = slots, .image_size_bytes = 123456};
+    const unsigned target_index = slots.target_subtype - ESP_PARTITION_SUBTYPE_APP_OTA_0;
+    memset(prepared.sha256, image_seed[target_index], sizeof prepared.sha256);
+    /* esp_ota_begin invalidates the old B otadata before eota_prepare succeeds. */
+    target_state = EOTA_STATE_UNTRACKED;
+    observe_calls = 0;
+    return prepared;
+}
+
+static void expect_prepared_uncertain(const eota_prepared_t *prepared)
+{
+    esp_base_ota_firmware_set_t set;
+    memset(&set, 0xff, sizeof set);
+    assert(esp_base_ota_observe_firmware_set(
+        ESP_BASE_OTA_FIRMWARE_PREPARED_CANDIDATE, prepared, &set) ==
+        ESP_BASE_OTA_FIRMWARE_UNCERTAIN);
     const esp_base_ota_firmware_set_t empty = {0};
     assert(memcmp(&set, &empty, sizeof set) == 0);
 }
@@ -142,49 +167,51 @@ int main(void)
 {
     esp_base_ota_firmware_set_t set;
     reset();
-    assert(esp_base_ota_observe_firmware_set(ESP_BASE_OTA_FIRMWARE_CONFIRMED, NULL) == ESP_BASE_OTA_FIRMWARE_INVALID_ARGUMENT);
+    assert(esp_base_ota_observe_firmware_set(
+        ESP_BASE_OTA_FIRMWARE_CONFIRMED, NULL, NULL) ==
+        ESP_BASE_OTA_FIRMWARE_INVALID_ARGUMENT);
     memset(&set, 0xff, sizeof set);
     assert(esp_base_ota_observe_firmware_set(
-               (esp_base_ota_firmware_observation_t)2, &set) ==
+               (esp_base_ota_firmware_observation_t)3, NULL, &set) ==
            ESP_BASE_OTA_FIRMWARE_INVALID_ARGUMENT);
     const esp_base_ota_firmware_set_t empty = {0};
     assert(memcmp(&set, &empty, sizeof set) == 0 && observe_calls == 0);
     signed_enabled = false;
     memset(&set, 0xff, sizeof set);
-    assert(esp_base_ota_observe_firmware_set(ESP_BASE_OTA_FIRMWARE_CONFIRMED, &set) == ESP_BASE_OTA_FIRMWARE_UNSUPPORTED);
+    assert(esp_base_ota_observe_firmware_set(ESP_BASE_OTA_FIRMWARE_CONFIRMED, NULL, &set) == ESP_BASE_OTA_FIRMWARE_UNSUPPORTED);
     assert(memcmp(&set, &empty, sizeof set) == 0 && observe_calls == 0);
 
     reset();
-    assert(esp_base_ota_observe_firmware_set(ESP_BASE_OTA_FIRMWARE_CONFIRMED, &set) == ESP_BASE_OTA_FIRMWARE_OK);
+    assert(esp_base_ota_observe_firmware_set(ESP_BASE_OTA_FIRMWARE_CONFIRMED, NULL, &set) == ESP_BASE_OTA_FIRMWARE_OK);
     assert(set.bootable_count == 2 && set.running_firmware_sha256[0] == 0xa0 &&
            set.bootable_firmware_sha256[0][0] == 0xa0 &&
            set.bootable_firmware_sha256[1][0] == 0xb0 &&
            observe_calls == 2 && verify_calls == 2 && rollback_calls == 2);
 
     reset(); running_subtype = boot_subtype = ESP_PARTITION_SUBTYPE_APP_OTA_1;
-    assert(esp_base_ota_observe_firmware_set(ESP_BASE_OTA_FIRMWARE_CONFIRMED, &set) == ESP_BASE_OTA_FIRMWARE_OK);
+    assert(esp_base_ota_observe_firmware_set(ESP_BASE_OTA_FIRMWARE_CONFIRMED, NULL, &set) == ESP_BASE_OTA_FIRMWARE_OK);
     assert(set.bootable_count == 2 && set.running_firmware_sha256[0] == 0xb0 &&
            set.bootable_firmware_sha256[1][0] == 0xa0);
 
     reset(); image_seed[1] = image_seed[0];
-    assert(esp_base_ota_observe_firmware_set(ESP_BASE_OTA_FIRMWARE_CONFIRMED, &set) == ESP_BASE_OTA_FIRMWARE_OK);
+    assert(esp_base_ota_observe_firmware_set(ESP_BASE_OTA_FIRMWARE_CONFIRMED, NULL, &set) == ESP_BASE_OTA_FIRMWARE_OK);
     assert(set.bootable_count == 1 && set.bootable_firmware_sha256[0][0] == 0xa0 &&
            set.bootable_firmware_sha256[1][0] == 0);
 
     reset(); target_state = EOTA_STATE_UNTRACKED;
     image_result[1] = EOTA_UPDATE_IMAGE_INVALID;
-    assert(esp_base_ota_observe_firmware_set(ESP_BASE_OTA_FIRMWARE_CONFIRMED, &set) == ESP_BASE_OTA_FIRMWARE_OK);
+    assert(esp_base_ota_observe_firmware_set(ESP_BASE_OTA_FIRMWARE_CONFIRMED, NULL, &set) == ESP_BASE_OTA_FIRMWARE_OK);
     assert(set.bootable_count == 1 && set.running_firmware_sha256[0] == 0xa0 && rollback_calls == 0);
 
     reset(); running_state = EOTA_STATE_PENDING_VERIFY;
     expect_uncertain(ESP_BASE_OTA_FIRMWARE_CONFIRMED);
-    assert(esp_base_ota_observe_firmware_set(ESP_BASE_OTA_FIRMWARE_PENDING_TRIAL, &set) ==
+    assert(esp_base_ota_observe_firmware_set(ESP_BASE_OTA_FIRMWARE_PENDING_TRIAL, NULL, &set) ==
            ESP_BASE_OTA_FIRMWARE_OK);
     assert(set.bootable_count == 2 && set.running_firmware_sha256[0] == 0xa0 &&
            set.bootable_firmware_sha256[1][0] == 0xb0 && rollback_calls == 2);
     reset(); running_subtype = boot_subtype = ESP_PARTITION_SUBTYPE_APP_OTA_1;
     running_state = EOTA_STATE_PENDING_VERIFY;
-    assert(esp_base_ota_observe_firmware_set(ESP_BASE_OTA_FIRMWARE_PENDING_TRIAL, &set) ==
+    assert(esp_base_ota_observe_firmware_set(ESP_BASE_OTA_FIRMWARE_PENDING_TRIAL, NULL, &set) ==
            ESP_BASE_OTA_FIRMWARE_OK);
     assert(set.bootable_count == 2 && set.running_firmware_sha256[0] == 0xb0 &&
            set.bootable_firmware_sha256[1][0] == 0xa0);
@@ -222,5 +249,84 @@ int main(void)
     image_result[1] = EOTA_UPDATE_RESOURCE_FAILURE; expect_uncertain(ESP_BASE_OTA_FIRMWARE_CONFIRMED);
     reset(); change_during_hash = true; expect_uncertain(ESP_BASE_OTA_FIRMWARE_CONFIRMED);
     reset(); image_seed[0] = 0; expect_uncertain(ESP_BASE_OTA_FIRMWARE_CONFIRMED);
-    puts("  ota_firmware passed (verified signed set, rollback, fallback and mutation rejection)");
+
+    reset();
+    memset(&set, 0xff, sizeof set);
+    assert(esp_base_ota_observe_firmware_set(
+        ESP_BASE_OTA_FIRMWARE_PREPARED_CANDIDATE, NULL, &set) ==
+        ESP_BASE_OTA_FIRMWARE_INVALID_ARGUMENT);
+    assert(memcmp(&set, &empty, sizeof set) == 0);
+    eota_prepared_t prepared = prepared_receipt();
+    memset(&set, 0xff, sizeof set);
+    assert(esp_base_ota_observe_firmware_set(
+        ESP_BASE_OTA_FIRMWARE_CONFIRMED, &prepared, &set) ==
+        ESP_BASE_OTA_FIRMWARE_INVALID_ARGUMENT);
+    assert(memcmp(&set, &empty, sizeof set) == 0);
+    assert(esp_base_ota_observe_firmware_set(
+        ESP_BASE_OTA_FIRMWARE_PREPARED_CANDIDATE, &prepared, &set) ==
+        ESP_BASE_OTA_FIRMWARE_OK);
+    assert(set.bootable_count == 2 && set.running_firmware_sha256[0] == 0xa0 &&
+           set.bootable_firmware_sha256[1][0] == 0xb0 &&
+           observe_calls == 2 && verify_calls == 2 && rollback_calls == 0);
+
+    reset(); running_subtype = boot_subtype = ESP_PARTITION_SUBTYPE_APP_OTA_1;
+    prepared = prepared_receipt();
+    assert(esp_base_ota_observe_firmware_set(
+        ESP_BASE_OTA_FIRMWARE_PREPARED_CANDIDATE, &prepared, &set) ==
+        ESP_BASE_OTA_FIRMWARE_OK);
+    assert(set.running_firmware_sha256[0] == 0xb0 &&
+           set.bootable_firmware_sha256[1][0] == 0xa0);
+
+    reset(); prepared = prepared_receipt(); prepared.image_size_bytes = 0;
+    expect_prepared_uncertain(&prepared);
+    reset(); prepared = prepared_receipt(); --prepared.image_size_bytes;
+    expect_prepared_uncertain(&prepared);
+    reset(); prepared = prepared_receipt(); memset(prepared.sha256, 0, sizeof prepared.sha256);
+    expect_prepared_uncertain(&prepared);
+    reset(); prepared = prepared_receipt(); prepared.sha256[0] ^= 1U;
+    expect_prepared_uncertain(&prepared);
+    reset(); prepared = prepared_receipt(); prepared.slots.target_address_bytes += 0x1000;
+    expect_prepared_uncertain(&prepared);
+    reset(); prepared = prepared_receipt(); prepared.slots.running_state = EOTA_STATE_PENDING_VERIFY;
+    expect_prepared_uncertain(&prepared);
+    reset(); prepared = prepared_receipt(); prepared.slots.target_state = EOTA_STATE_NEW;
+    expect_prepared_uncertain(&prepared);
+
+    const eota_state_t rejected_target_states[] = {
+        EOTA_STATE_VALID, EOTA_STATE_NEW, EOTA_STATE_PENDING_VERIFY,
+        EOTA_STATE_UNDEFINED, EOTA_STATE_OTHER,
+    };
+    for (size_t index = 0; index < sizeof rejected_target_states / sizeof rejected_target_states[0]; ++index) {
+        reset(); prepared = prepared_receipt(); target_state = rejected_target_states[index];
+        expect_prepared_uncertain(&prepared);
+    }
+    reset(); prepared = prepared_receipt(); target_state = EOTA_STATE_INVALID;
+    assert(esp_base_ota_observe_firmware_set(
+        ESP_BASE_OTA_FIRMWARE_PREPARED_CANDIDATE, &prepared, &set) ==
+        ESP_BASE_OTA_FIRMWARE_OK);
+    reset(); prepared = prepared_receipt(); target_state = EOTA_STATE_ABORTED;
+    assert(esp_base_ota_observe_firmware_set(
+        ESP_BASE_OTA_FIRMWARE_PREPARED_CANDIDATE, &prepared, &set) ==
+        ESP_BASE_OTA_FIRMWARE_OK);
+
+    reset(); prepared = prepared_receipt(); running_state = EOTA_STATE_PENDING_VERIFY;
+    expect_prepared_uncertain(&prepared);
+    reset(); prepared = prepared_receipt(); boot_subtype = ESP_PARTITION_SUBTYPE_APP_OTA_1;
+    expect_prepared_uncertain(&prepared);
+    reset(); prepared = prepared_receipt(); image_result[0] = EOTA_UPDATE_IMAGE_INVALID;
+    expect_prepared_uncertain(&prepared);
+    reset(); prepared = prepared_receipt(); image_result[1] = EOTA_UPDATE_IMAGE_INVALID;
+    expect_prepared_uncertain(&prepared);
+    reset(); prepared = prepared_receipt(); image_seed[1] = image_seed[0];
+    expect_prepared_uncertain(&prepared);
+    reset(); prepared = prepared_receipt(); image_chip_id[1] = 0x0009;
+    expect_prepared_uncertain(&prepared);
+    reset(); prepared = prepared_receipt(); strcpy(image_project[1], "other_product");
+    expect_prepared_uncertain(&prepared);
+    reset(); prepared = prepared_receipt(); partitions[1].address += 0x1000;
+    expect_prepared_uncertain(&prepared);
+    reset(); prepared = prepared_receipt(); change_during_hash = true;
+    expect_prepared_uncertain(&prepared);
+
+    puts("  ota_firmware passed (confirmed, trial and prepared A/C signed observation; failure rejection)");
 }

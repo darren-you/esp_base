@@ -55,11 +55,11 @@ econtainer_slots_result_t esp_base_container_with_firmware_set(
     econtainer_slot_firmware_set_t mapped = {0};
     econtainer_slots_result_t result = ECONTAINER_SLOTS_UNCERTAIN;
     if (esp_base_ota_observe_firmware_set(
-            observation, &before) == ESP_BASE_OTA_FIRMWARE_OK &&
+            observation, NULL, &before) == ESP_BASE_OTA_FIRMWARE_OK &&
         map_firmware_set(&before, &mapped)) {
         result = operation(&mapped, context);
         if (esp_base_ota_observe_firmware_set(
-                observation, &after) != ESP_BASE_OTA_FIRMWARE_OK ||
+                observation, NULL, &after) != ESP_BASE_OTA_FIRMWARE_OK ||
             memcmp(&before, &after, sizeof before) != 0) {
             result = ECONTAINER_SLOTS_UNCERTAIN;
         }

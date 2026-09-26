@@ -13,8 +13,10 @@ static bool mutate_after_operation;
 static esp_base_storage_owner_t *shared_owner;
 
 esp_base_ota_firmware_result_t esp_base_ota_observe_firmware_set(
+    esp_base_ota_firmware_observation_t observation,
     esp_base_ota_firmware_set_t *firmware_set)
 {
+    assert(observation == ESP_BASE_OTA_FIRMWARE_CONFIRMED);
     ++observe_calls;
     *firmware_set = (esp_base_ota_firmware_set_t){0};
     if (observed_result == ESP_BASE_OTA_FIRMWARE_OK) {

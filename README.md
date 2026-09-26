@@ -66,7 +66,7 @@ ESP32 未签名构建必须显式声明 `ESP_BASE_ESP32_OFFLINE_PROBE=ON` 且关
 
 签名构建的 `ota.start` 在下载前将最近一次 operation ID、设备 ID、完整镜像摘要/长度和双槽写入 `base_store/base_ota/operation` 并读回。只读 `ota.result` 可在新 boot 按原 operation ID 查询：worker 活跃和新槽 pending 为 running，新槽 VALID 且镜像摘要相同才 succeeded，有可核对失败证据才 failed，其余为 unknown。旧回滚镜像若不含此查询代码，工具仍须报告 unknown；本轮没有升级实板上的旧镜像。
 
-签名构建的 `esp_base_ota_observe_firmware_set` 在调用方串行化所有 app/otadata 写入时读取运行、下次启动及另一槽状态，再调用锁定 `esp-ota` 验签并计算完整 signed bin 摘要。只有当前槽为 `VALID` 且下次启动槽与之相同，另一槽为 `VALID` 并由 IDF 判定可回滚，或另一槽镜像确实无效时才返回确定集合；pending、状态变化及仍可能被 bootloader 回退扫描加载的歧义镜像全部拒绝。当前没有独立包分区或 Container 运行接线，接口的 host 假件与 C3 编译不证明实板启动/回滚。
+签名构建的 `esp_base_ota_observe_firmware_set` 在调用方串行化所有 app/otadata 写入时读取运行、下次启动及另一槽状态，再调用锁定 `esp-ota` 验签并计算完整 signed bin 摘要。已确认模式要求当前槽为 `VALID`；显式 pending trial 模式仅允许当前槽为 `PENDING_VERIFY`、另一槽 `VALID` 且经 IDF 证明可回滚。两种模式均要求下次启动槽等于运行槽，拒绝状态变化与仍可能被 bootloader 回退扫描加载的歧义镜像；pending 身份观察本身不批准业务试运行。当前没有独立包分区或 Container 运行接线，接口的 host 假件与 C3 编译不证明实板启动/回滚。
 
 启动与 `ota.start` 现使用同一本次 boot 的串行 owner；可选 [Container 固件集合适配](firmware/integrations/container_binding/README.md)在 claim 内将只读签名集合逐字段送入 Container，并在操作后复读。当前主应用没有包分区或 Container 产品调用方，这只提供可独立验证的接线，不能算三包槽、联合 OTA 或实板验收。
 

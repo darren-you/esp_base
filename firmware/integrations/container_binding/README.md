@@ -13,7 +13,7 @@ flowchart LR
     ota["Base 启动确认 / ota.start"] -->|"使用同一 owner"| owner
 ```
 
-`esp_base_container_with_firmware_set` 非阻塞取得与 Base 启动、`ota.start` 共用的 owner claim；无法取得即返回 `BUSY`。在 claim 内调用 `esp_base_ota_observe_firmware_set`，逐字段映射到 `econtainer_slot_firmware_set_t`，执行调用方的单次 Container 操作，再观察一次。任何未签名、pending、槽状态/摘要歧义或调用期间变化都返回 `UNCERTAIN`。`esp_base_container_reconcile` 在该流程中直接调用 Container 的真实 `reconcile`；不确定时清空状态并保持 `BOOT_BLOCKED`。Container provider 的内部存储信号量由其自身操作取得，不能把同一个非递归信号量同时作为外层 claim。
+`esp_base_container_with_firmware_set` 非阻塞取得与 Base 启动、`ota.start` 共用的 owner claim；无法取得即返回 `BUSY`。在 claim 内显式采用 `CONFIRMED` 模式调用 `esp_base_ota_observe_firmware_set`，逐字段映射到 `econtainer_slot_firmware_set_t`，执行调用方的单次 Container 操作，再观察一次。任何未签名、pending、槽状态/摘要歧义或调用期间变化都返回 `UNCERTAIN`。`esp_base_container_reconcile` 在该流程中直接调用 Container 的真实 `reconcile`；不确定时清空状态并保持 `BOOT_BLOCKED`。新观察接口的 `PENDING_TRIAL` 模式尚未接到本适配或主应用，不能绕过启动期 owner。Container provider 的内部存储信号量由其自身操作取得，不能把同一个非递归信号量同时作为外层 claim。
 
 Container 回调已开始却返回 `UNCERTAIN`，或回调前后固件集合不一致时，本次 boot 保留 claim；新 OTA 或包操作不得在无法证明的组合上继续。若回调前的只读观察就失败，则释放 claim，以便日后重新观察。持久状态只能在新 boot 重新对账后继续裁决。
 

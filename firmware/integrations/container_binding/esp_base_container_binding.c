@@ -51,11 +51,13 @@ econtainer_slots_result_t esp_base_container_with_firmware_set(
     econtainer_slot_firmware_set_t mapped = {0};
     econtainer_slots_result_t result = ECONTAINER_SLOTS_UNCERTAIN;
     bool operation_started = false;
-    if (esp_base_ota_observe_firmware_set(&before) == ESP_BASE_OTA_FIRMWARE_OK &&
+    if (esp_base_ota_observe_firmware_set(
+            ESP_BASE_OTA_FIRMWARE_CONFIRMED, &before) == ESP_BASE_OTA_FIRMWARE_OK &&
         map_firmware_set(&before, &mapped)) {
         operation_started = true;
         result = operation(&mapped, context);
-        if (esp_base_ota_observe_firmware_set(&after) != ESP_BASE_OTA_FIRMWARE_OK ||
+        if (esp_base_ota_observe_firmware_set(
+                ESP_BASE_OTA_FIRMWARE_CONFIRMED, &after) != ESP_BASE_OTA_FIRMWARE_OK ||
             memcmp(&before, &after, sizeof before) != 0) {
             result = ECONTAINER_SLOTS_UNCERTAIN;
         }

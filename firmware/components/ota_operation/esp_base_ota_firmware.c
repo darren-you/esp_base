@@ -56,26 +56,33 @@ static bool matching_base_image(const eota_policy_t *policy, uint8_t subtype,
 }
 
 esp_base_ota_firmware_result_t esp_base_ota_observe_firmware_set(
+    esp_base_ota_firmware_observation_t observation,
     esp_base_ota_firmware_set_t *firmware_set)
 {
     if (firmware_set == NULL) return ESP_BASE_OTA_FIRMWARE_INVALID_ARGUMENT;
     *firmware_set = (esp_base_ota_firmware_set_t){0};
+    if (observation != ESP_BASE_OTA_FIRMWARE_CONFIRMED &&
+        observation != ESP_BASE_OTA_FIRMWARE_PENDING_TRIAL) {
+        return ESP_BASE_OTA_FIRMWARE_INVALID_ARGUMENT;
+    }
     if (!eota_available()) return ESP_BASE_OTA_FIRMWARE_UNSUPPORTED;
 
     const eota_policy_t policy = esp_base_ota_policy(false);
+    const bool pending_trial = observation == ESP_BASE_OTA_FIRMWARE_PENDING_TRIAL;
     eota_slots_t before;
     if (eota_observe_slots(&policy, &before) != EOTA_UPDATE_OK ||
         before.running_subtype != before.boot_subtype ||
         before.running_address_bytes != before.boot_address_bytes ||
         before.running_size_bytes != before.boot_size_bytes ||
-        before.running_state != EOTA_STATE_VALID) return ESP_BASE_OTA_FIRMWARE_UNCERTAIN;
+        before.running_state != (pending_trial ? EOTA_STATE_PENDING_VERIFY :
+                                EOTA_STATE_VALID)) return ESP_BASE_OTA_FIRMWARE_UNCERTAIN;
 
-    /* VALID means the current image passed Base's local confirmation. An
-     * inactive VALID entry is admitted only when IDF also proves rollback is
-     * possible. A verified image with any other state might still be loaded
-     * by the bootloader's fallback scan, so refuse the whole observation. */
+    /* A pending trial must retain a proven VALID rollback image. A confirmed
+     * image may have no rollback if the inactive image is provably invalid.
+     * Any other state might still be loaded by the bootloader's fallback scan. */
     const bool has_rollback = before.target_state == EOTA_STATE_VALID;
-    if (!has_rollback && before.target_state != EOTA_STATE_UNTRACKED &&
+    if (pending_trial && !has_rollback) return ESP_BASE_OTA_FIRMWARE_UNCERTAIN;
+    if (!pending_trial && !has_rollback && before.target_state != EOTA_STATE_UNTRACKED &&
         before.target_state != EOTA_STATE_INVALID &&
         before.target_state != EOTA_STATE_ABORTED) return ESP_BASE_OTA_FIRMWARE_UNCERTAIN;
     if (has_rollback && !esp_ota_check_rollback_is_possible()) {
